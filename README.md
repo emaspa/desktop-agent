@@ -1,5 +1,9 @@
 # Desktop Agent
 
+[![Buy me a coffee](https://img.shields.io/badge/Buy%20me%20a%20coffee-emaspa-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/emaspa)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-emaspa-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/emaspa)
+[![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/emaspa)
+
 A KDE Plasma panel widget that turns Claude Code or OpenAI Codex into a system administrator for
 a CachyOS desktop, modeled on Omarchy's agents panel.
 
@@ -108,3 +112,7 @@ forces a re-check.
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+If you find Desktop Agent useful, consider
+[buying me a coffee](https://buymeacoffee.com/emaspa) or supporting it on
+[Ko-fi](https://ko-fi.com/emaspa).
