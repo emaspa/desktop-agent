@@ -14,6 +14,7 @@ PlasmoidItem {
     readonly property string cli: "\"$HOME/.local/bin/desktop-agent\""
     property var st: null
     property bool loading: false
+    property bool refreshQueued: false  // a forced refresh asked for while another was running
 
     readonly property color levelColor: !st ? Kirigami.Theme.textColor
         : st.worst === "error" ? Kirigami.Theme.negativeTextColor
@@ -53,7 +54,10 @@ PlasmoidItem {
     function shq(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
 
     function refresh(force) {
-        if (loading) return
+        if (loading) {
+            if (force) refreshQueued = true
+            return
+        }
         loading = true
         exec.connectSource(cli + " status" + (force ? " --refresh" : ""))
     }
@@ -71,7 +75,9 @@ PlasmoidItem {
 
     function launch(prompt) {
         // A timestamp keeps identical commands from being deduplicated by the data engine.
-        exec.connectSource(cli + " launch -- " + shq(prompt || "") + " #" + Date.now())
+        // --wait keeps the source open until the terminal closes; onNewData then re-checks the system,
+        // so a merged .pacnew or a finished update shows up as soon as the session ends.
+        exec.connectSource(cli + " launch --wait -- " + shq(prompt || "") + " #" + Date.now())
         root.expanded = false
     }
 
@@ -81,12 +87,20 @@ PlasmoidItem {
         connectedSources: []
         onNewData: (source, data) => {
             disconnectSource(source)
+            if (source.startsWith(root.cli + " launch ")) {
+                root.refresh(true)
+                return
+            }
             if (source.indexOf(" status") < 0) return
             root.loading = false
             try {
                 root.st = JSON.parse(data["stdout"])
             } catch (e) {
                 console.warn("desktop-agent status failed:", data["stderr"])
+            }
+            if (root.refreshQueued) {
+                root.refreshQueued = false
+                root.refresh(true)
             }
         }
     }

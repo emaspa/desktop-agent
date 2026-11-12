@@ -3,8 +3,9 @@
 
 Subcommands:
   status [--refresh]     JSON for the Plasma widget (usage limits, health checks, actions)
-  launch [--agent ID] [PROMPT...]
-                         open the active agent (or ID) in a terminal, in the admin workspace
+  launch [--agent ID] [--wait] [PROMPT...]
+                         open the active agent (or ID) in a terminal, in the admin workspace;
+                         --wait returns only when the terminal closes
   agents                 JSON: configured agents, the active one, models and permission choices
   agents set JSON        replace the agent list: {"active": ID, "agents": [...]}
   use ID                 make agent ID the active one
@@ -593,7 +594,7 @@ def agent_command(agent):
     return cmd + agent["args"]
 
 
-def launch(prompt=None, agent_id=None):
+def launch(prompt=None, agent_id=None, wait=False):
     cfg = load_config()
     ensure_workspace()
     agent = get_agent(cfg, agent_id)
@@ -606,8 +607,10 @@ def launch(prompt=None, agent_id=None):
     if which("systemd-run"):
         cmd = ["systemd-run", "--user", "--scope", "--quiet", "--collect",
                f"--unit=desktop-agent-{int(time.time() * 1000)}", *cmd]
-    subprocess.Popen(cmd, cwd=WORKSPACE, start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(cmd, cwd=WORKSPACE, start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if wait:  # the widget waits so it can re-check the system once the session is over
+        proc.wait()
 
 
 # ---------------------------------------------------------------- watch service
@@ -768,12 +771,17 @@ def main(argv):
     if cmd == "status":
         print(json.dumps(status(force="--refresh" in args)))
     elif cmd == "launch":
-        agent_id = None
-        if args[:1] == ["--agent"] and len(args) > 1:
-            agent_id, args = args[1], args[2:]
+        agent_id, wait = None, False
+        while args[:1] in (["--agent"], ["--wait"]):
+            if args[0] == "--wait":
+                wait, args = True, args[1:]
+            elif len(args) > 1:
+                agent_id, args = args[1], args[2:]
+            else:
+                break
         if args[:1] == ["--"]:
             args = args[1:]
-        launch(" ".join(args).strip() or None, agent_id)
+        launch(" ".join(args).strip() or None, agent_id, wait)
     elif cmd == "agents":
         if args[:1] == ["set"] and len(args) > 1:
             try:

@@ -16,7 +16,8 @@ distro with Plasma 6.
   - plan limits with reset times for every login on the machine (Claude, ChatGPT)
   - health checks: updates, .pacnew files, failed units, disk space, crashes in the last 24h,
     pending reboot, and error count for this boot. Each one has a button that hands the problem
-    to the agent.
+    to the agent. When you close the agent's window, the checks run again, so a merged .pacnew
+    or a finished update drops off the list right away.
   - task buttons: update, health check, disk cleanup, boot errors
 - **Several agents.** Each agent has a name, a program (Claude Code or Codex), a model and a
   permission level. Two come preconfigured, and you can add more: a "Claude · GPT-5.5" that runs
