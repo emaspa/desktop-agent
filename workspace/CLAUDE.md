@@ -14,17 +14,17 @@ covering what changed and how to undo it.
   so a bad change can be rolled back by booting a snapshot.
 - Installed tools: `checkupdates`, `pacdiff`, `paccache`, `arch-update` (it runs a tray icon of its own),
   `coredumpctl`, `smartctl`, `sensors`, `snapper`.
-- Root access goes through `hsudo` (see the global CLAUDE.md). Each call triggers a face-unlock
-  prompt, so batch root work into few calls.
+- Root commands below use `sudo`. If the user's global instructions name a sudo wrapper, use that
+  instead. Each call may prompt for authentication, so batch root work into few calls.
 
 ## Rules
 
 1. Before a risky system change (package removals, bootloader, kernel, /etc edits, partitions),
-   take a snapshot: `hsudo snapper -c root create -c number -d "desktop-agent: <what>"`.
+   take a snapshot: `sudo snapper -c root create -c number -d "desktop-agent: <what>"`.
 2. Never reboot, log out, or restart plasmashell/kwin without asking.
 3. Before a system update, check https://archlinux.org/news/ for items needing manual
    intervention since the last update (`grep -i 'upgraded\|installed' /var/log/pacman.log | tail`).
-   Run updates non-interactively: `hsudo pacman -Syu --noconfirm`, then
+   Run updates non-interactively: `sudo pacman -Syu --noconfirm`, then
    `script -qec "yay -Sua --noconfirm" /dev/null` for AUR.
 4. Show a diff before overwriting anything in /etc. Merge .pacnew files by hand; never just
    copy them over.

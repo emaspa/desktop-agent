@@ -68,3 +68,7 @@ Claude Code's own login in `~/.claude/.credentials.json`. The widget never refre
 because rotating it could sign Claude Code out. If the token has expired, the widget says so until the
 next `claude` session renews it. The CLI caches the slow checks (`checkupdates`, `yay -Qua`,
 `pacdiff`) for an hour. The refresh button forces a re-check.
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).

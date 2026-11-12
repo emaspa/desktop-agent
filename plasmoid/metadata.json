@@ -6,7 +6,7 @@
         "Description": "Claude Code as a system admin: plan limits, health checks, crash diagnosis",
         "Icon": "utilities-terminal",
         "Id": "dev.desktopagent.panel",
-        "License": "MIT",
+        "License": "GPL-3.0-or-later",
         "Name": "Desktop Agent",
         "Version": "1.0.0"
     },
