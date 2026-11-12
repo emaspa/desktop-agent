@@ -74,11 +74,13 @@ PlasmoidItem {
     }
 
     function launch(prompt, handled) {
+        // Starting a Diagnose session deals with the crashes it lists: mark them and re-check now,
+        // so the alert clears as soon as the agent opens.
+        if (handled) exec.connectSource(cli + " handled " + shq(handled) + " && " + cli + " status #" + Date.now())
         // A timestamp keeps identical commands from being deduplicated by the data engine.
         // --wait keeps the source open until the terminal closes; onNewData then re-checks the system,
         // so a merged .pacnew or a finished update shows up as soon as the session ends.
-        exec.connectSource(cli + " launch --wait" + (handled ? " --handled " + shq(handled) : "")
-                           + " -- " + shq(prompt || "") + " #" + Date.now())
+        exec.connectSource(cli + " launch --wait -- " + shq(prompt || "") + " #" + Date.now())
         root.expanded = false
     }
 
