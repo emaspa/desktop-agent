@@ -3,6 +3,8 @@
 
 Subcommands:
   status [--refresh]     JSON for the Plasma widget (usage limits, health checks, actions)
+  dismiss [--undo]       take the current alerts off the panel icon (they stay in the popup and
+                         come back if they change); --undo shows them again. Prints status JSON
   launch [--agent ID] [--wait] [PROMPT...]
                          open the active agent (or ID) in a terminal, in the admin workspace;
                          --wait returns only when the terminal closes
@@ -498,7 +500,7 @@ def check_disks(mounts):
             continue
         pct = round(100 * (1 - free / total))
         level = "error" if pct >= 95 else "warn" if pct >= 85 else "ok"
-        check = {"id": f"disk:{m}", "icon": "drive-harddisk", "level": level,
+        check = {"id": f"disk:{m}", "icon": "drive-harddisk", "level": level, "dismiss_key": level,
                  "title": f"{m} {pct}% full", "detail": f"{free / 1e9:.0f} GB free of {total / 1e9:.0f} GB"}
         if level != "ok":
             check.update(action="Clean up", prompt=DEFAULT_CONFIG["actions"][2]["prompt"] + f" Focus on {m}.")
@@ -566,7 +568,8 @@ def check_crashes(muted):
     return [{"id": "crashes", "icon": "tools-report-bug", "level": "warn",
              "title": f"{len(new)} new crash{'es' if len(new) != 1 else ''} in 24h",
              "detail": f"last: {Path(last['exe']).name} {ago} ago" + (f" · also {', '.join(others)}"[:70] if others else ""),
-             "action": "Diagnose", "prompt": prompt, "handled": f"crashes:{last['time']}"}]
+             "action": "Diagnose", "prompt": prompt, "handled": f"crashes:{last['time']}",
+             "dismiss_key": str(last["time"])}]
 
 
 def check_journal():
@@ -598,7 +601,17 @@ def crashes_prompt(crashes):
             "For the ones that are noise I can ignore, offer to mute them with `desktop-agent mute NAME`.")
 
 
-def status(force=False):
+DISMISSED = DATA_DIR / "dismissed.json"
+
+
+def dismiss_key(check):
+    """An alert stays dismissed until this changes: more updates, another failed unit, a new crash,
+    a disk past the next level."""
+    return f"{check['id']}|" + check.get("dismiss_key", f"{check['title']}|{check.get('detail', '')}")
+
+
+def status(force=False, dismiss=None):
+    """dismiss=True hides the current alerts from the panel icon, False shows them again."""
     cfg = load_config()
     cache = Cache()
     active = get_agent(cfg)
@@ -613,12 +626,33 @@ def status(force=False):
                            "title": "Check failed", "detail": str(e)[:120]})
     order = {"error": 0, "warn": 1, "info": 2, "ok": 3}
     checks.sort(key=lambda c: order.get(c["level"], 9))
-    attention = sum(1 for c in checks if c["level"] in ("error", "warn"))
-    worst = checks[0]["level"] if checks else "ok"
+    alerts = [c for c in checks if c["level"] in ("error", "warn")]
+    if dismiss is True:  # replaces the file, so alerts that went away are forgotten
+        DISMISSED.parent.mkdir(parents=True, exist_ok=True)
+        DISMISSED.write_text(json.dumps(sorted(dismiss_key(c) for c in alerts), indent=1))
+    elif dismiss is False:
+        DISMISSED.unlink(missing_ok=True)
+    try:
+        hidden = set(json.loads(DISMISSED.read_text()))
+    except (FileNotFoundError, json.JSONDecodeError, TypeError):
+        hidden = set()
+    current = {dismiss_key(c) for c in alerts}
+    if hidden - current:  # an alert that cleared and comes back later must show again
+        hidden &= current
+        if hidden:
+            DISMISSED.write_text(json.dumps(sorted(hidden), indent=1))
+        else:
+            DISMISSED.unlink(missing_ok=True)
+    for c in alerts:
+        if dismiss_key(c) in hidden:
+            c["dismissed"] = True
+    shown = [c for c in checks if not c.get("dismissed")]
     return {"usage": usage, "checks": checks, "actions": cfg["actions"],
             "agents": {"active": active["id"],
                        "list": [{"id": a["id"], "name": a["name"]} for a in agent_list(cfg)]},
-            "attention": attention, "worst": worst, "updated": time.strftime("%H:%M")}
+            "attention": sum(1 for c in shown if c["level"] in ("error", "warn")),
+            "dismissed": sum(1 for c in checks if c.get("dismissed")),
+            "worst": shown[0]["level"] if shown else "ok", "updated": time.strftime("%H:%M")}
 
 
 # ---------------------------------------------------------------- launching
@@ -827,6 +861,8 @@ def main(argv):
     cmd, args = argv[0], argv[1:]
     if cmd == "status":
         print(json.dumps(status(force="--refresh" in args)))
+    elif cmd == "dismiss":
+        print(json.dumps(status(dismiss="--undo" not in args)))
     elif cmd == "launch":
         agent_id, wait = None, False
         while args[:1] in (["--agent"], ["--wait"]):

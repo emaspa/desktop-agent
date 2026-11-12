@@ -62,6 +62,11 @@ PlasmoidItem {
         exec.connectSource(cli + " status" + (force ? " --refresh" : ""))
     }
 
+    // Takes the current alerts off the panel icon (or puts them back); the popup still lists them.
+    function dismissAlerts(undo) {
+        exec.connectSource(cli + " dismiss" + (undo ? " --undo" : "") + " #" + Date.now())
+    }
+
     function activeName() {
         if (!st) return ""
         const a = st.agents.list.find(a => a.id === st.agents.active)
@@ -94,7 +99,7 @@ PlasmoidItem {
                 root.refresh(true)
                 return
             }
-            if (source.indexOf(" status") < 0) return
+            if (source.indexOf(" status") < 0 && !source.startsWith(root.cli + " dismiss")) return
             root.loading = false
             try {
                 root.st = JSON.parse(data["stdout"])
@@ -340,6 +345,20 @@ PlasmoidItem {
                             text: modelData.label
                             icon.name: modelData.icon || ""
                             onClicked: root.launch(modelData.prompt)
+                        }
+                    }
+                    // Takes the alerts off the panel icon; the checks above stay as they are.
+                    PlasmaComponents.Button {
+                        readonly property bool undo: !!root.st && root.st.attention === 0 && root.st.dismissed > 0
+                        visible: !!root.st && (root.st.attention > 0 || undo)
+                        icon.name: undo ? "notifications" : "notifications-disabled"
+                        text: undo ? "Show alerts" : "Dismiss alerts"
+                        onClicked: root.dismissAlerts(undo)
+                        PlasmaComponents.ToolTip {
+                            text: parent.undo
+                                ? "Put the badge back on the panel icon"
+                                : "Clear the badge and color from the panel icon. The checks stay here, "
+                                  + "and an alert comes back when it changes."
                         }
                     }
                 }

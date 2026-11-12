@@ -9,7 +9,10 @@ your desktop, modeled on Omarchy's agents panel. Built for CachyOS; it works on 
 distro with Plasma 6.
 
 - **Panel icon.** Click opens the popup, middle-click opens the agent. The icon turns
-  orange or red and shows a count when something needs attention.
+  orange or red and shows a count when something needs attention. *Dismiss alerts*, after the
+  task buttons, clears the icon but keeps the checks in the popup. New alerts always show. A
+  dismissed one comes back when it changes, say more updates, another failed service, a new
+  crash or a disk going from orange to red, and when it clears and happens again later.
 - **Popup:**
   - an agent switcher in the header
   - a prompt box ("Ask the agent to do something…")
