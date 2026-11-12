@@ -3,7 +3,8 @@
     "KPlugin": {
         "Authors": [
             {
-                "Name": "Emanuele Sparvoli"
+                "Name": "Emanuele Sparvoli",
+                "Website": "https://sparvoli.it"
             }
         ],
         "Category": "System Information",
