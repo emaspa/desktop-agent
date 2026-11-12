@@ -1,0 +1,14 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [{ "Name": "Desktop Agent" }],
+        "Category": "System Information",
+        "Description": "Claude Code as a system admin: plan limits, health checks, crash diagnosis",
+        "Icon": "utilities-terminal",
+        "Id": "dev.desktopagent.panel",
+        "License": "MIT",
+        "Name": "Desktop Agent",
+        "Version": "1.0.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

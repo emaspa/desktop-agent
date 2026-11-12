@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Desktop Agent
+GenericName=System admin agent
+Comment=Open Claude Code as a system administrator for this machine
+Exec=desktop-agent launch
+Icon=utilities-terminal
+Categories=System;
+Keywords=claude;agent;admin;
+X-KDE-Shortcuts=Meta+Shift+A

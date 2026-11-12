@@ -1,0 +1,589 @@
+#!/usr/bin/env python3
+"""desktop-agent: a system-admin agent for KDE Plasma, backed by Claude Code.
+
+Subcommands:
+  status [--refresh]     JSON for the Plasma widget (usage limits, health checks, actions)
+  launch [PROMPT...]     open Claude Code in a terminal, in the admin workspace
+  diagnose PID           launch the agent on a core dump
+  watch                  long-running: crash notifications + usage-limit alerts
+  mute EXE | unmute EXE  silence crash notifications for one program
+  shortcut [KEYS]        show or set the open-agent hotkey, e.g. "Meta+Shift+A" ("" clears it)
+  config                 print the effective config and its path
+"""
+
+import fcntl
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "desktop-agent" / "config.json"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "desktop-agent"
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "desktop-agent"
+WORKSPACE = DATA_DIR / "workspace"
+CREDENTIALS = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude")) / ".credentials.json"
+
+USAGE_TTL = 300          # seconds between plan-usage fetches
+UPDATES_TTL = 3600       # seconds between checkupdates runs
+USAGE_ALERT_PERCENT = 90
+
+DEFAULT_CONFIG = {
+    # Terminal command; the claude invocation is appended after it.
+    "terminal": ["konsole", "--workdir", "{workspace}", "-p", "tabtitle=Agent", "-e"],
+    "claude": "claude",
+    # Extra arguments for claude, e.g. ["--permission-mode", "acceptEdits"] or ["--model", "opus"].
+    "claude_args": [],
+    "crash_capture": True,
+    "muted": [],
+    "disk_mounts": ["/", "/home"],
+    "actions": [
+        {"label": "Update system", "icon": "system-software-update",
+         "prompt": "Update this CachyOS system: read any Arch/CachyOS news that needs manual intervention, "
+                   "run the update, then handle new .pacnew files and tell me if a reboot is needed."},
+        {"label": "Health check", "icon": "checkmark",
+         "prompt": "Run a health check of this machine: failed units, journal errors this boot, recent "
+                   "crashes, disk and btrfs health, SMART status, temperatures. Report what needs attention "
+                   "and propose fixes; don't change anything yet."},
+        {"label": "Free disk space", "icon": "edit-clear-all",
+         "prompt": "Find what's using disk space and propose a cleanup: pacman/yay caches, orphans, "
+                   "journal size, old snapper snapshots, large caches in my home. Ask before deleting."},
+        {"label": "Boot errors", "icon": "dialog-warning",
+         "prompt": "Review errors and warnings from the current boot (journalctl -b -p warning). "
+                   "Group them, explain which matter, and fix the ones worth fixing."},
+    ],
+}
+
+
+# ---------------------------------------------------------------- helpers
+
+def load_config():
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    try:
+        cfg.update(json.loads(CONFIG_PATH.read_text()))
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError as e:
+        print(f"desktop-agent: ignoring invalid {CONFIG_PATH}: {e}", file=sys.stderr)
+    return cfg
+
+
+def save_config(cfg):
+    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Only persist keys that differ from defaults, so new defaults reach existing installs.
+    out = {k: v for k, v in cfg.items() if DEFAULT_CONFIG.get(k) != v}
+    CONFIG_PATH.write_text(json.dumps(out, indent=2) + "\n")
+
+
+def run(cmd, timeout=20):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return p.returncode, p.stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return -1, ""
+
+
+def which(name):
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in (HOME / ".local/bin", Path("/usr/local/bin"), Path("/usr/bin")):
+        if (d / name).is_file():
+            return str(d / name)
+    return None
+
+
+def human_delta(seconds):
+    seconds = int(max(0, seconds))
+    if seconds < 3600:
+        return f"{max(1, seconds // 60)}m"
+    if seconds < 86400:
+        h, m = divmod(seconds // 60, 60)
+        return f"{h}h {m}m" if m else f"{h}h"
+    d, h = divmod(seconds // 3600, 24)
+    return f"{d}d {h}h" if h else f"{d}d"
+
+
+def parse_iso(ts):
+    try:
+        return datetime.fromisoformat(ts).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+class Cache:
+    """JSON cache of slow results, guarded by a file lock so concurrent callers don't duplicate work."""
+
+    def __init__(self):
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        self.path = CACHE_DIR / "cache.json"
+        self.lock_path = CACHE_DIR / "cache.lock"
+
+    def get(self, key, ttl, compute, force=False):
+        with open(self.lock_path, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            data = self._read()
+            entry = data.get(key)
+            if not force and entry and time.time() - entry["at"] < ttl:
+                return entry["value"]
+            value = compute()
+            data = self._read()
+            data[key] = {"at": time.time(), "value": value}
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data))
+            tmp.replace(self.path)
+            return value
+
+    def _read(self):
+        try:
+            return json.loads(self.path.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+
+# ---------------------------------------------------------------- plan usage
+
+PLAN_NAMES = {"max": "Max", "pro": "Pro", "team": "Team", "enterprise": "Enterprise"}
+
+
+def fetch_usage():
+    """Read Claude plan limits with Claude Code's own OAuth login. Never refreshes the token:
+    rotating it here could sign Claude Code out, so an expired token just reports as stale."""
+    try:
+        oauth = json.loads(CREDENTIALS.read_text())["claudeAiOauth"]
+    except (FileNotFoundError, KeyError, json.JSONDecodeError):
+        return {"error": "Not signed in to Claude Code"}
+
+    tier = oauth.get("rateLimitTier") or ""
+    plan = PLAN_NAMES.get(oauth.get("subscriptionType"), (oauth.get("subscriptionType") or "").title())
+    for mult in ("20x", "5x"):
+        if mult in tier:
+            plan = f"{plan} {mult}"
+    result = {"plan": plan, "limits": []}
+
+    if oauth.get("expiresAt", 0) / 1000 < time.time():
+        result["error"] = "Login expired; open the agent once to refresh it"
+        return result
+
+    req = urllib.request.Request(
+        "https://api.anthropic.com/api/oauth/usage",
+        headers={
+            "Authorization": f"Bearer {oauth['accessToken']}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "Content-Type": "application/json",
+            "User-Agent": "desktop-agent/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.load(resp)
+    except urllib.error.HTTPError as e:
+        result["error"] = f"Usage request failed (HTTP {e.code})"
+        return result
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        result["error"] = f"Usage request failed ({getattr(e, 'reason', e)})"
+        return result
+
+    limits = []
+    for lim in body.get("limits") or []:
+        group = (lim.get("group") or lim.get("kind") or "limit").replace("_", " ")
+        label = {"weekly": "Weekly", "session": "Session", "five hour": "Session"}.get(group, group.title())
+        scope = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+        if scope:
+            label += f" · {scope}"
+        limits.append({"label": label, "percent": lim.get("percent") or 0,
+                       "resets_at": lim.get("resets_at"), "severity": lim.get("severity", "normal")})
+    if not limits:  # older response shape
+        for key, label in (("five_hour", "Session"), ("seven_day", "Weekly")):
+            if body.get(key):
+                limits.append({"label": label, "percent": body[key].get("utilization") or 0,
+                               "resets_at": body[key].get("resets_at"), "severity": "normal"})
+    result["limits"] = limits
+    return result
+
+
+def decorate_usage(usage):
+    now = time.time()
+    for lim in usage.get("limits", []):
+        reset = parse_iso(lim.get("resets_at"))
+        lim["detail"] = f"{round(lim['percent'])}%" + (f" · resets in {human_delta(reset - now)}" if reset else "")
+    return usage
+
+
+# ---------------------------------------------------------------- health checks
+
+def fetch_updates():
+    repo, aur = [], []
+    if which("checkupdates"):
+        code, out = run(["checkupdates", "--nocolor"], timeout=120)
+        if code == 0:
+            repo = [line.split()[0] for line in out.splitlines() if line.strip()]
+    helper = which("paru") or which("yay")
+    if helper:
+        code, out = run([helper, "-Qua"], timeout=120)
+        aur = [line.split()[0] for line in out.splitlines() if line.strip() and not line.startswith(":")]
+    pacnew = []
+    if which("pacdiff"):
+        _, out = run(["pacdiff", "-o"], timeout=60)
+        pacnew = [line for line in out.splitlines() if line.strip()]
+    return {"repo": repo, "aur": aur, "pacnew": pacnew}
+
+
+def check_updates(cache, force):
+    u = cache.get("updates", UPDATES_TTL, fetch_updates, force)
+    checks = []
+    n = len(u["repo"]) + len(u["aur"])
+    if n:
+        parts = [f"{len(u['repo'])} repo"] + ([f"{len(u['aur'])} AUR"] if u["aur"] else [])
+        checks.append({"id": "updates", "icon": "system-software-update", "level": "warn",
+                       "title": f"{n} update{'s' if n != 1 else ''} available",
+                       "detail": ", ".join(parts), "action": "Update",
+                       "prompt": DEFAULT_CONFIG["actions"][0]["prompt"]})
+    else:
+        checks.append({"id": "updates", "icon": "system-software-update", "level": "ok",
+                       "title": "System up to date", "detail": ""})
+    if u["pacnew"]:
+        files = u["pacnew"]
+        checks.append({"id": "pacnew", "icon": "document-edit", "level": "warn",
+                       "title": f"{len(files)} .pacnew file{'s' if len(files) != 1 else ''}",
+                       "detail": ", ".join(Path(f).name for f in files[:3]) + ("…" if len(files) > 3 else ""),
+                       "action": "Merge",
+                       "prompt": "Review and merge these .pacnew files, keeping my local changes where they "
+                                 "matter and taking upstream changes otherwise: " + " ".join(files)})
+    return checks
+
+
+def check_reboot():
+    running = os.uname().release
+    if not Path("/usr/lib/modules", running).is_dir():
+        return [{"id": "reboot", "icon": "system-reboot", "level": "warn",
+                 "title": "Reboot pending", "detail": f"running kernel {running} is no longer installed"}]
+    return []
+
+
+def check_failed_units():
+    units = []
+    for scope in ([], ["--user"]):
+        _, out = run(["systemctl", *scope, "--failed", "--plain", "--no-legend"])
+        for line in out.splitlines():
+            if line.strip():
+                units.append(("user " if scope else "") + line.split()[0])
+    if not units:
+        return [{"id": "units", "icon": "run-build", "level": "ok", "title": "No failed services", "detail": ""}]
+    return [{"id": "units", "icon": "run-build", "level": "error",
+             "title": f"{len(units)} failed service{'s' if len(units) != 1 else ''}",
+             "detail": ", ".join(u.replace("\\x2d", "-") for u in units[:3]), "action": "Fix",
+             "prompt": "These systemd units have failed: " + ", ".join(units) +
+                       ". Find out why from their logs and fix them (or disable them if they're obsolete)."}]
+
+
+def check_disks(mounts):
+    # btrfs subvolumes (/ and /home on CachyOS) share one device: report it once.
+    sources = {}
+    with open("/proc/self/mounts") as f:
+        for line in f:
+            dev, mnt = line.split()[:2]
+            sources[mnt.replace("\\040", " ")] = dev
+    checks, seen = [], set()
+    for m in mounts:
+        if not os.path.ismount(m) or sources.get(m, m) in seen:
+            continue
+        seen.add(sources.get(m, m))
+        st = os.statvfs(m)
+        total = st.f_blocks * st.f_frsize
+        free = st.f_bavail * st.f_frsize
+        if not total:
+            continue
+        pct = round(100 * (1 - free / total))
+        level = "error" if pct >= 95 else "warn" if pct >= 85 else "ok"
+        check = {"id": f"disk:{m}", "icon": "drive-harddisk", "level": level,
+                 "title": f"{m} {pct}% full", "detail": f"{free / 1e9:.0f} GB free of {total / 1e9:.0f} GB"}
+        if level != "ok":
+            check.update(action="Clean up", prompt=DEFAULT_CONFIG["actions"][2]["prompt"] + f" Focus on {m}.")
+        checks.append(check)
+    return checks
+
+
+def recent_crashes(since="-24h"):
+    code, out = run(["coredumpctl", "list", f"--since={since}", "--json=short", "--no-pager"])
+    if code != 0 or not out.strip():
+        return []
+    try:
+        return json.loads(out)
+    except json.JSONDecodeError:
+        return []
+
+
+def check_crashes(muted):
+    crashes = [c for c in recent_crashes() if Path(c.get("exe", "")).name not in muted and c.get("exe") not in muted]
+    if not crashes:
+        return [{"id": "crashes", "icon": "tools-report-bug", "level": "ok", "title": "No crashes today", "detail": ""}]
+    last = crashes[-1]
+    names = sorted({Path(c["exe"]).name for c in crashes})
+    ago = human_delta(time.time() - last["time"] / 1e6)
+    return [{"id": "crashes", "icon": "tools-report-bug", "level": "warn",
+             "title": f"{len(crashes)} crash{'es' if len(crashes) != 1 else ''} in 24h",
+             "detail": f"last: {Path(last['exe']).name} {ago} ago" + (f" · also {', '.join(n for n in names if n != Path(last['exe']).name)[:60]}" if len(names) > 1 else ""),
+             "action": "Diagnose", "prompt": crash_prompt(last["pid"], last["exe"])}]
+
+
+def check_journal():
+    _, out = run(["journalctl", "-b", "-p", "3", "-q", "--no-pager", "-o", "cat"], timeout=30)
+    n = len([line for line in out.splitlines() if line.strip()])
+    if not n:
+        return []
+    return [{"id": "journal", "icon": "view-list-text", "level": "info",
+             "title": f"{n} error log line{'s' if n != 1 else ''} this boot", "detail": "journalctl -b -p err",
+             "action": "Review", "prompt": DEFAULT_CONFIG["actions"][3]["prompt"]}]
+
+
+def crash_prompt(pid, exe):
+    return (f"Process {exe} (PID {pid}) crashed and left a core dump. Diagnose it: start with "
+            f"`coredumpctl info {pid}`, get a backtrace with `coredumpctl debug {pid} --debugger-arguments='-batch -ex \"thread apply all bt\"'` "
+            f"(debuginfod is fine to use), and look at the journal around the crash time. "
+            f"Tell me the likely cause, whether it's a known upstream bug or something local, and what to do about it. "
+            f"If it's noise I can ignore, say so and offer to mute it with `desktop-agent mute {Path(exe).name}`.")
+
+
+def status(force=False):
+    cfg = load_config()
+    cache = Cache()
+    usage = decorate_usage(cache.get("usage", USAGE_TTL, fetch_usage, force))
+    checks = []
+    for fn in (lambda: check_updates(cache, force), check_reboot, check_failed_units,
+               lambda: check_disks(cfg["disk_mounts"]), lambda: check_crashes(set(cfg["muted"])), check_journal):
+        try:
+            checks.extend(fn())
+        except Exception as e:  # one broken check must not blank the widget
+            checks.append({"id": "error", "icon": "dialog-error", "level": "info",
+                           "title": "Check failed", "detail": str(e)[:120]})
+    order = {"error": 0, "warn": 1, "info": 2, "ok": 3}
+    checks.sort(key=lambda c: order.get(c["level"], 9))
+    attention = sum(1 for c in checks if c["level"] in ("error", "warn"))
+    worst = checks[0]["level"] if checks else "ok"
+    return {"usage": usage, "checks": checks, "actions": cfg["actions"],
+            "attention": attention, "worst": worst, "updated": time.strftime("%H:%M")}
+
+
+# ---------------------------------------------------------------- launching
+
+def ensure_workspace():
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
+
+
+def launch(prompt=None):
+    cfg = load_config()
+    ensure_workspace()
+    claude = which(cfg["claude"]) or cfg["claude"]
+    cmd = [part.replace("{workspace}", str(WORKSPACE)) for part in cfg["terminal"]]
+    cmd += [claude, *cfg["claude_args"]]
+    if prompt:
+        cmd.append(prompt)
+    # Run in its own transient scope so the session outlives plasmashell / the watch service.
+    if which("systemd-run"):
+        cmd = ["systemd-run", "--user", "--scope", "--quiet", "--collect",
+               f"--unit=desktop-agent-{int(time.time() * 1000)}", *cmd]
+    subprocess.Popen(cmd, cwd=WORKSPACE, start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+# ---------------------------------------------------------------- watch service
+
+def notify(title, body, icon, actions=None, on_action=None):
+    """Send a desktop notification; if actions are given, wait for a click in a thread."""
+    cmd = ["notify-send", "-a", "Desktop Agent", "-i", icon]
+    for key, label in (actions or {}).items():
+        cmd.append(f"--action={key}={label}")
+    cmd += [title, body]
+
+    def worker():
+        code, out = run(cmd, timeout=3600)
+        if on_action and out.strip():
+            on_action(out.strip())
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def watch_crashes():
+    last_seen = {}
+    proc = subprocess.Popen(["journalctl", "-f", "-n", "0", "-o", "json", "SYSLOG_IDENTIFIER=systemd-coredump"],
+                            stdout=subprocess.PIPE, text=True)
+    for line in proc.stdout:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        pid, exe = ev.get("COREDUMP_PID"), ev.get("COREDUMP_EXE")
+        if not pid or not exe:
+            continue
+        cfg = load_config()
+        name = Path(exe).name
+        if not cfg["crash_capture"] or name in cfg["muted"] or exe in cfg["muted"]:
+            continue
+        if time.time() - last_seen.get(exe, 0) < 120:  # crash loops: one notification per program
+            continue
+        last_seen[exe] = time.time()
+        sig = ev.get("COREDUMP_SIGNAL_NAME") or f"signal {ev.get('COREDUMP_SIGNAL', '?')}"
+
+        def on_action(action, pid=pid, exe=exe, name=name):
+            if action == "diagnose":
+                launch(crash_prompt(pid, exe))
+            elif action == "mute":
+                mute(name)
+
+        notify("Process crashed", f"{name} ({sig}, PID {pid})", "tools-report-bug",
+               {"diagnose": "Diagnose", "mute": f"Mute {name}"}, on_action)
+
+
+def watch_usage():
+    alerted = {}
+    cache = Cache()
+    while True:
+        try:
+            usage = cache.get("usage", USAGE_TTL, fetch_usage, force=True)
+            for lim in usage.get("limits", []):
+                key = f"{lim['label']}|{lim.get('resets_at')}"
+                if lim["percent"] >= USAGE_ALERT_PERCENT and key not in alerted:
+                    alerted[key] = True
+                    reset = parse_iso(lim.get("resets_at"))
+                    when = f", resets in {human_delta(reset - time.time())}" if reset else ""
+                    notify("Claude usage limit", f"{lim['label']} at {round(lim['percent'])}%{when}", "dialog-warning")
+            # Updates are slow to compute; refreshing them here keeps the widget's popup instant.
+            cache.get("updates", UPDATES_TTL, fetch_updates)
+        except Exception as e:
+            print(f"usage watch: {e}", file=sys.stderr, flush=True)
+        time.sleep(USAGE_TTL)
+
+
+def watch():
+    threading.Thread(target=watch_usage, daemon=True).start()
+    while True:
+        try:
+            watch_crashes()
+        except Exception as e:
+            print(f"crash watch: {e}", file=sys.stderr, flush=True)
+        time.sleep(5)
+
+
+def mute(name, on=True):
+    cfg = load_config()
+    muted = [m for m in cfg["muted"] if m != name]
+    if on:
+        muted.append(name)
+    cfg["muted"] = muted
+    save_config(cfg)
+
+
+# ---------------------------------------------------------------- global shortcut
+
+# kglobalaccel identifies the launcher by its .desktop file, and takes keys as Qt key codes.
+SHORTCUT_ACTION = "['desktop-agent.desktop','_launch','Desktop Agent','Desktop Agent']"
+QT_MODIFIERS = {"Shift": 0x02000000, "Ctrl": 0x04000000, "Alt": 0x08000000, "Meta": 0x10000000, "Num": 0x20000000}
+QT_KEYS = {
+    "Esc": 0x01000000, "Escape": 0x01000000, "Tab": 0x01000001, "Backspace": 0x01000003,
+    "Return": 0x01000004, "Enter": 0x01000005, "Ins": 0x01000006, "Insert": 0x01000006,
+    "Del": 0x01000007, "Delete": 0x01000007, "Pause": 0x01000008, "Print": 0x01000009,
+    "SysReq": 0x0100000A, "Home": 0x01000010, "End": 0x01000011, "Left": 0x01000012,
+    "Up": 0x01000013, "Right": 0x01000014, "Down": 0x01000015, "PgUp": 0x01000016,
+    "PgDown": 0x01000017, "Menu": 0x01000055, "Space": 0x20,
+    **{f"F{n}": 0x01000030 + n - 1 for n in range(1, 36)},
+}
+
+
+def keys_to_code(text):
+    """'Meta+Shift+A' -> Qt key code. A trailing '+' key is written 'Ctrl++'."""
+    parts = text.split("+")
+    if text.endswith("++"):
+        parts = parts[:-2] + ["+"]
+    *mods, key = parts
+    code = 0
+    for m in mods:
+        if m not in QT_MODIFIERS:
+            raise ValueError(f"unknown modifier {m!r}")
+        code |= QT_MODIFIERS[m]
+    if key in QT_KEYS:
+        return code | QT_KEYS[key]
+    if len(key) == 1:
+        return code | ord(key.upper())
+    raise ValueError(f"unknown key {key!r}")
+
+
+def code_to_keys(code):
+    names = [name for name, bit in QT_MODIFIERS.items() if code & bit]
+    names.sort(key=["Meta", "Ctrl", "Alt", "Shift", "Num"].index)
+    key = code & 0x01FFFFFF
+    by_code = {v: k for k, v in reversed(QT_KEYS.items())}
+    names.append(by_code.get(key) or chr(key))
+    return "+".join(names)
+
+
+def kglobalaccel(method, *args):
+    code, out = run(["gdbus", "call", "--session", "--dest", "org.kde.kglobalaccel",
+                     "--object-path", "/kglobalaccel", "--method", f"org.kde.KGlobalAccel.{method}", *args])
+    if code != 0:
+        raise RuntimeError(f"kglobalaccel {method} failed")
+    return out
+
+
+def get_shortcut():
+    out = kglobalaccel("shortcut", SHORTCUT_ACTION)  # e.g. "([301989953],)"
+    codes = [int(c) for c in out.strip("()[],\n ").replace("@ai", "").split(",") if c.strip().isdigit()]
+    return code_to_keys(codes[0]) if codes else ""
+
+
+def set_shortcut(text):
+    keys = f"[{keys_to_code(text)}]" if text else "@ai []"
+    kglobalaccel("doRegister", SHORTCUT_ACTION)
+    kglobalaccel("setShortcut", SHORTCUT_ACTION, keys, "6")  # SetPresent | NoAutoloading
+
+
+# ---------------------------------------------------------------- main
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip())
+        return 0
+    cmd, args = argv[0], argv[1:]
+    if cmd == "status":
+        print(json.dumps(status(force="--refresh" in args)))
+    elif cmd == "launch":
+        if args[:1] == ["--"]:
+            args = args[1:]
+        launch(" ".join(args).strip() or None)
+    elif cmd == "diagnose" and args:
+        exe = next((c["exe"] for c in recent_crashes("-30d") if str(c["pid"]) == args[0]), "unknown executable")
+        launch(crash_prompt(args[0], exe))
+    elif cmd == "watch":
+        watch()
+    elif cmd in ("mute", "unmute"):
+        if not args:
+            print("\n".join(load_config()["muted"]) or "(nothing muted)")
+        else:
+            mute(args[0], cmd == "mute")
+    elif cmd == "shortcut":
+        if args:
+            try:
+                set_shortcut(args[0].strip())
+            except ValueError as e:
+                print(f"desktop-agent: {e}", file=sys.stderr)
+                return 2
+        print(get_shortcut())
+    elif cmd == "config":
+        print(f"# {CONFIG_PATH}")
+        print(json.dumps(load_config(), indent=2))
+    else:
+        print(f"desktop-agent: unknown command {cmd!r}; see --help", file=sys.stderr)
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
