@@ -5,7 +5,8 @@
 [![Sponsor](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/emaspa)
 
 A KDE Plasma panel widget that turns Claude Code or OpenAI Codex into a system administrator for
-a CachyOS desktop, modeled on Omarchy's agents panel.
+your desktop, modeled on Omarchy's agents panel. Built for CachyOS; it works on any Arch-based
+distro with Plasma 6.
 
 - **Panel icon.** Click opens the popup, middle-click opens the agent. The icon turns
   orange or red and shows a count when something needs attention.
@@ -24,39 +25,87 @@ a CachyOS desktop, modeled on Omarchy's agents panel.
 - **Crash capture.** When something core dumps you get a notification with *Diagnose* (launches
   the agent on the core dump) and *Mute* buttons.
 - **Usage alerts.** You get one notification when a plan limit passes 90%.
-- **Shortcuts.** Meta+A toggles the popup and Meta+Shift+A opens the agent. Plasma uses both
-  default keys for walking through activities, so a fresh install unbinds them there. Later
-  installs leave your keys alone.
+- **Hotkeys.** Meta+A toggles the popup and Meta+Shift+A opens the agent.
 
-Agents run in Konsole from `~/.local/share/desktop-agent/workspace`. Its `AGENTS.md` (which
-`CLAUDE.md` imports) describes the system and sets ground rules: snapshot before risky changes,
-never reboot without asking, log every change to `~/.local/share/desktop-agent/changes.md`.
-Machine-specific notes, such as a sudo wrapper, go in `local.md` next to it; see
-`workspace/local.md.example`.
+## Requirements
+
+- **KDE Plasma 6** on an Arch-based distro. The update and .pacnew checks use pacman's tools;
+  on other distros the widget runs but those two checks stay empty.
+- **Packages:**
+
+  ```sh
+  sudo pacman -S --needed python kpackage qt6-tools glib2 libnotify pacman-contrib konsole
+  ```
+
+  The installer checks for these and prints the command for anything missing. `yay` or `paru`
+  is optional; with one installed, the update count includes AUR packages.
+- **At least one agent**, installed and signed in:
+
+  | Agent | Install | Sign in | Account |
+  | --- | --- | --- | --- |
+  | [Claude Code](https://code.claude.com/docs/en/setup) | `curl -fsSL https://claude.ai/install.sh \| bash` | `claude auth login` | Claude Pro or Max, or an API key |
+  | [Codex](https://developers.openai.com/codex/cli) | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | `codex login` | ChatGPT plan, or an API key |
+
+  Plan limits show in the popup only for subscription logins, since API keys have no plan
+  limits to show. You can install both and switch between them.
 
 ## Install
 
-```sh
-./install.sh
-```
+1. Download `desktop-agent-<version>.tar.gz` from the
+   [latest release](https://github.com/emaspa/desktop-agent/releases/latest) and unpack it:
 
-The script symlinks the CLI into `~/.local/bin`, installs the widget and adds it to the panel
-that holds the system tray, enables the `desktop-agent` user service, and registers the
-shortcuts. Re-run it after pulling changes. QML changes take effect after
+   ```sh
+   tar xzf desktop-agent-*.tar.gz
+   cd desktop-agent-*/
+   ```
+
+2. Run the installer from your Plasma session:
+
+   ```sh
+   ./install.sh
+   ```
+
+   It copies the app to `~/.local/share/desktop-agent/app` (you can delete the download
+   afterwards), puts `desktop-agent` in `~/.local/bin`, adds the widget to the panel that holds
+   your system tray, starts the `desktop-agent` user service, and sets the hotkeys. Plasma
+   binds Meta+A and Meta+Shift+A to switching activities by default, so the first install
+   unbinds them there.
+
+3. Press Meta+Shift+A, or middle-click the icon. The first time, Claude Code and Codex each ask
+   you to trust the agent's folder; answer yes.
+
+To install from git instead, clone the repo and run `./install.sh` in the checkout. The
+installed files then link to the checkout, so `git pull` updates the CLI right away; re-run the
+installer to update the widget and service.
+
+### Update
+
+Download the new release and run its `./install.sh`. Your agents, hotkeys and notes are kept.
+If the widget changed, restart Plasma's shell to load it:
 `systemctl --user restart plasma-plasmashell`.
 
-The first launch of each program shows its folder-trust prompt for the workspace.
+### Uninstall
 
-## Settings
+```sh
+~/.local/share/desktop-agent/app/install.sh --uninstall
+```
 
-Open them with the gear in the popup, or right-click the icon and pick *Configure Desktop
-Agent*. The *Agent* page has:
+From a git checkout, run `./install.sh --uninstall` there. This removes the widget, service,
+hotkey and CLI. It keeps `~/.config/desktop-agent` (your settings) and
+`~/.local/share/desktop-agent` (the agents' change log and your notes); delete them to remove
+everything.
 
-- **Agents**: name, model (type one, or pick from Claude Code's model picker or Codex's model
-  list), permissions, and which agent is active. Add and remove agents here.
+## Configure
+
+### In the widget
+
+Click the gear in the popup, or right-click the icon and pick *Configure Desktop Agent*. The
+*Agent* page has:
+
+- **Agents**: name, model, permissions, and which agent is active. Type a model name or pick one
+  from Claude Code's model picker or Codex's model list; leave it empty for the program's
+  default. Add and remove agents here.
 - **Shortcuts**: the open-agent and show-popup hotkeys.
-
-A *Support this project* page next to it has the Buy Me a Coffee and Ko-fi links.
 
 Permissions map to each program's own flags:
 
@@ -79,9 +128,19 @@ Permissions map to each program's own flags:
 "Own settings" passes no flags, so `~/.claude/settings.json` or `~/.codex/config.toml` decides.
 A sandboxed Codex can't run `sudo`, so use full access or never-ask for system changes.
 
-Everything is also scriptable: `desktop-agent agents`, `desktop-agent use codex`,
-`desktop-agent launch --agent codex "check my disks"`, `desktop-agent shortcut "Meta+Ctrl+A"`.
-`desktop-agent config` prints the effective config, and you can override any key in
+### The agents' instructions
+
+Agents run in Konsole from `~/.local/share/desktop-agent/workspace`. `AGENTS.md` there (which
+`CLAUDE.md` imports) describes the system and sets ground rules: snapshot before risky changes,
+never reboot without asking, log every change to `~/.local/share/desktop-agent/changes.md`. The
+launcher refreshes both files from the app on every launch, so put your own notes in
+`local.md` in the same folder: both agents read it. See `workspace/local.md.example`. It's the
+place for things like a sudo wrapper, since a terminal-less agent can't answer a password
+prompt.
+
+### Config file and CLI
+
+`desktop-agent config` prints the effective config. Override any key in
 `~/.config/desktop-agent/config.json`:
 
 ```json
@@ -95,21 +154,27 @@ Everything is also scriptable: `desktop-agent agents`, `desktop-agent use codex`
 arguments to its command line. `muted` lists programs whose crashes don't notify;
 `desktop-agent mute <exe>` adds to it.
 
+Everything in the settings page is scriptable too: `desktop-agent agents`,
+`desktop-agent use codex`, `desktop-agent launch --agent codex "check my disks"`,
+`desktop-agent shortcut "Meta+Ctrl+A"`. Run `desktop-agent --help` for the full list.
+
 ## How it works
 
 | Piece | File |
 | --- | --- |
 | CLI: status JSON, launcher, watcher, settings | `bin/desktop-agent` (Python, stdlib only) |
-| Panel widget and settings page | `plasmoid/` (QML; runs `desktop-agent status` every minute) |
+| Panel widget and settings pages | `plasmoid/` (QML; runs `desktop-agent status` every minute) |
 | Crash and usage watcher | `systemd/desktop-agent.service` |
 | Agent instructions | `workspace/AGENTS.md` |
 
 Plan usage comes from the endpoints the CLIs themselves use (Claude Code's `/usage`, Codex's
 `/status`), authenticated with each CLI's own login in `~/.claude/.credentials.json` and
-`~/.codex/auth.json`. The widget never refreshes those tokens, because rotating one could sign the
-CLI out. If a token has expired, the widget says so until that CLI's next session renews it. The
-CLI caches the slow checks (`checkupdates`, `yay -Qua`, `pacdiff`) for an hour. The refresh button
-forces a re-check.
+`~/.codex/auth.json`. Those tokens only go to Anthropic and OpenAI. The widget never refreshes
+them, because rotating one could sign the CLI out; if a token has expired, the widget says so
+until that CLI's next session renews it. The CLI caches the slow checks (`checkupdates`,
+`yay -Qua`, `pacdiff`) for an hour, and the refresh button forces a re-check.
+
+A *Support this project* page in the widget's settings has the Buy Me a Coffee and Ko-fi links.
 
 ## License
 

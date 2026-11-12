@@ -8,6 +8,7 @@ Subcommands:
   agents                 JSON: configured agents, the active one, models and permission choices
   agents set JSON        replace the agent list: {"active": ID, "agents": [...]}
   use ID                 make agent ID the active one
+  workspace              refresh the agent instructions in the workspace and print its path
   diagnose PID           launch the agent on a core dump
   watch                  long-running: crash notifications + usage-limit alerts
   mute EXE | unmute EXE  silence crash notifications for one program
@@ -35,6 +36,7 @@ CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "deskt
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "desktop-agent"
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "desktop-agent"
 WORKSPACE = DATA_DIR / "workspace"
+APP_ROOT = Path(__file__).resolve().parent.parent  # the checkout or installed copy this script runs from
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude"))
 CODEX_DIR = Path(os.environ.get("CODEX_HOME", HOME / ".codex"))
 
@@ -561,7 +563,19 @@ def status(force=False):
 # ---------------------------------------------------------------- launching
 
 def ensure_workspace():
+    """Copy the agent instructions into the workspace as real files. Symlinks would make Claude Code
+    resolve CLAUDE.md's imports next to the link target, outside the workspace: that triggers its
+    external-imports prompt and misses workspace/local.md."""
     WORKSPACE.mkdir(parents=True, exist_ok=True)
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        src, dst = APP_ROOT / "workspace" / name, WORKSPACE / name
+        if not src.is_file():
+            continue
+        text = src.read_text()
+        if dst.is_symlink() or not dst.is_file() or dst.read_text() != text:
+            dst.unlink(missing_ok=True)
+            dst.write_text(text)
+    return WORKSPACE
 
 
 def agent_command(agent):
@@ -762,6 +776,8 @@ def main(argv):
                 print(f"desktop-agent: {e}", file=sys.stderr)
                 return 2
         print(json.dumps(agents_info(load_config())))
+    elif cmd == "workspace":
+        print(ensure_workspace())
     elif cmd == "use" and args:
         try:
             use_agent(args[0])
