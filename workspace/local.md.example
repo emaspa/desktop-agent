@@ -1,0 +1,6 @@
+# Notes for this machine
+
+Copy to ~/.local/share/desktop-agent/workspace/local.md and edit. Both agents read it.
+
+- Root: use `mysudo` instead of `sudo` (it handles authentication without a TTY).
+- /mnt/data is a separate btrfs pool with its own snapper config `data`.

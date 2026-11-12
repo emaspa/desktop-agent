@@ -1,5 +1,5 @@
 [Unit]
-Description=Desktop Agent: crash notifications and Claude usage alerts
+Description=Desktop Agent: crash notifications and plan usage alerts
 PartOf=graphical-session.target
 After=graphical-session.target
 

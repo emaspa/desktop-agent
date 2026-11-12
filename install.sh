@@ -16,7 +16,8 @@ ln -sfn "$repo/bin/desktop-agent" "$bin"
 
 echo "• Agent workspace → $data/workspace"
 mkdir -p "$data/workspace"
-ln -sfn "$repo/workspace/CLAUDE.md" "$data/workspace/CLAUDE.md"
+# AGENTS.md is read by Codex; CLAUDE.md just imports it for Claude Code.
+for f in AGENTS.md CLAUDE.md; do ln -sfn "$repo/workspace/$f" "$data/workspace/$f"; done
 touch "$data/changes.md"
 
 echo "• Launcher entry"

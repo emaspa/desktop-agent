@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""desktop-agent: a system-admin agent for KDE Plasma, backed by Claude Code.
+"""desktop-agent: a system-admin agent for KDE Plasma, backed by Claude Code or Codex.
 
 Subcommands:
   status [--refresh]     JSON for the Plasma widget (usage limits, health checks, actions)
-  launch [PROMPT...]     open Claude Code in a terminal, in the admin workspace
+  launch [--agent ID] [PROMPT...]
+                         open the active agent (or ID) in a terminal, in the admin workspace
+  agents                 JSON: configured agents, the active one, models and permission choices
+  agents set JSON        replace the agent list: {"active": ID, "agents": [...]}
+  use ID                 make agent ID the active one
   diagnose PID           launch the agent on a core dump
   watch                  long-running: crash notifications + usage-limit alerts
   mute EXE | unmute EXE  silence crash notifications for one program
@@ -11,6 +15,7 @@ Subcommands:
   config                 print the effective config and its path
 """
 
+import base64
 import fcntl
 import json
 import os
@@ -30,18 +35,23 @@ CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / "deskt
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "desktop-agent"
 DATA_DIR = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "desktop-agent"
 WORKSPACE = DATA_DIR / "workspace"
-CREDENTIALS = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude")) / ".credentials.json"
+CLAUDE_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", HOME / ".claude"))
+CODEX_DIR = Path(os.environ.get("CODEX_HOME", HOME / ".codex"))
 
 USAGE_TTL = 300          # seconds between plan-usage fetches
 UPDATES_TTL = 3600       # seconds between checkupdates runs
 USAGE_ALERT_PERCENT = 90
 
 DEFAULT_CONFIG = {
-    # Terminal command; the claude invocation is appended after it.
-    "terminal": ["konsole", "--workdir", "{workspace}", "-p", "tabtitle=Agent", "-e"],
-    "claude": "claude",
-    # Extra arguments for claude, e.g. ["--permission-mode", "acceptEdits"] or ["--model", "opus"].
-    "claude_args": [],
+    # Terminal command; the agent invocation is appended after it.
+    "terminal": ["konsole", "--workdir", "{workspace}", "-p", "tabtitle={name}", "-e"],
+    # Agents you can switch between. "type" picks the CLI (see AGENT_TYPES); "model" and
+    # "permissions" empty mean the CLI's own defaults; "args" are extra CLI arguments.
+    "active_agent": "claude",
+    "agents": [
+        {"id": "claude", "name": "Claude Code", "type": "claude", "model": "", "permissions": "", "args": []},
+        {"id": "codex", "name": "Codex (ChatGPT)", "type": "codex", "model": "", "permissions": "", "args": []},
+    ],
     "crash_capture": True,
     "muted": [],
     "disk_mounts": ["/", "/home"],
@@ -149,47 +159,163 @@ class Cache:
             return {}
 
 
+# ---------------------------------------------------------------- agents
+
+# Each permission choice maps to the CLI's own flags. "" passes nothing, so the CLI's config applies.
+AGENT_TYPES = {
+    "claude": {
+        "label": "Claude Code", "command": "claude", "provider": "claude", "model_flag": "--model",
+        "permissions": [
+            ("", "Claude Code's own settings", []),
+            ("plan", "Read-only: plan mode, no changes", ["--permission-mode", "plan"]),
+            ("manual", "Ask before edits and commands", ["--permission-mode", "manual"]),
+            ("acceptEdits", "Auto-approve file edits, ask for commands", ["--permission-mode", "acceptEdits"]),
+            ("auto", "Auto mode: approve safe actions, ask about risky ones", ["--permission-mode", "auto"]),
+            ("bypass", "Never ask (full access)", ["--dangerously-skip-permissions"]),
+        ],
+    },
+    "codex": {
+        "label": "Codex", "command": "codex", "provider": "chatgpt", "model_flag": "--model",
+        "permissions": [
+            ("", "Codex's own settings", []),
+            ("read-only", "Read-only sandbox", ["--sandbox", "read-only", "--ask-for-approval", "on-request"]),
+            ("workspace", "Sandboxed to the workspace, asks to go outside it",
+             ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"]),
+            ("approve-for-me", "Auto-review: a reviewer model answers approval requests", ["--approve-for-me"]),
+            ("full-access", "Full access, the model asks when it judges it risky",
+             ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]),
+            ("bypass", "Never ask (full access, no sandbox)", ["--dangerously-bypass-approvals-and-sandbox"]),
+        ],
+    },
+}
+
+
+def agent_list(cfg):
+    """The configured agents with missing fields filled in; unknown types are dropped."""
+    agents = []
+    for a in cfg.get("agents") or []:
+        if a.get("type") not in AGENT_TYPES or not a.get("id"):
+            continue
+        perms = {p[0] for p in AGENT_TYPES[a["type"]]["permissions"]}
+        agents.append({"id": str(a["id"]), "type": a["type"],
+                       "name": a.get("name") or AGENT_TYPES[a["type"]]["label"],
+                       "model": a.get("model") or "",
+                       "permissions": a.get("permissions") if a.get("permissions") in perms else "",
+                       "args": list(a.get("args") or [])})
+    return agents or json.loads(json.dumps(DEFAULT_CONFIG["agents"]))
+
+
+def get_agent(cfg, agent_id=None):
+    agents = agent_list(cfg)
+    wanted = agent_id or cfg.get("active_agent")
+    return next((a for a in agents if a["id"] == wanted), agents[0])
+
+
+def model_choices(agent_type):
+    """Models to suggest in the settings page. Free text is always allowed too."""
+    if agent_type == "claude":
+        try:  # Claude Code's model picker (includes gateway models when one is configured)
+            opts = json.loads((CLAUDE_DIR / "settings.json").read_text())["modelPicker"]["options"]
+            return [{"id": o["model"], "label": o.get("label") or o["model"]} for o in opts if o.get("model")]
+        except (FileNotFoundError, KeyError, TypeError, json.JSONDecodeError):
+            return [{"id": m, "label": m.title()} for m in ("opus", "sonnet", "haiku")]
+    if agent_type == "codex":
+        try:
+            models = json.loads((CODEX_DIR / "models_cache.json").read_text())["models"]
+            return [{"id": m["slug"], "label": m.get("display_name") or m["slug"]}
+                    for m in models if m.get("visibility", "list") == "list"]
+        except (FileNotFoundError, KeyError, TypeError, json.JSONDecodeError):
+            return []
+    return []
+
+
+def agents_info(cfg):
+    return {
+        "active": get_agent(cfg)["id"],
+        "agents": agent_list(cfg),
+        "types": {t: {"label": d["label"], "installed": bool(which(d["command"])),
+                      "models": model_choices(t),
+                      "permissions": [{"id": p[0], "label": p[1]} for p in d["permissions"]]}
+                  for t, d in AGENT_TYPES.items()},
+    }
+
+
+def set_agents(payload):
+    data = json.loads(payload)
+    cfg = load_config()
+    agents = agent_list({"agents": data.get("agents")})
+    ids = [a["id"] for a in agents]
+    if len(set(ids)) != len(ids):
+        raise ValueError("agent ids must be unique")
+    cfg["agents"] = agents
+    cfg["active_agent"] = data.get("active") if data.get("active") in ids else ids[0]
+    save_config(cfg)
+
+
+def use_agent(agent_id):
+    cfg = load_config()
+    if agent_id not in [a["id"] for a in agent_list(cfg)]:
+        raise ValueError(f"no agent with id {agent_id!r}")
+    cfg["active_agent"] = agent_id
+    save_config(cfg)
+
+
 # ---------------------------------------------------------------- plan usage
 
-PLAN_NAMES = {"max": "Max", "pro": "Pro", "team": "Team", "enterprise": "Enterprise"}
+def window_label(seconds):
+    return {18000: "Session", 86400: "Daily", 604800: "Weekly"}.get(seconds) or f"{human_delta(seconds)} window"
 
 
-def fetch_usage():
-    """Read Claude plan limits with Claude Code's own OAuth login. Never refreshes the token:
-    rotating it here could sign Claude Code out, so an expired token just reports as stale."""
+def http_json(url, headers):
+    req = urllib.request.Request(url, headers={"User-Agent": "desktop-agent/1.0", "Accept": "application/json",
+                                               **headers})
     try:
-        oauth = json.loads(CREDENTIALS.read_text())["claudeAiOauth"]
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.load(resp), None
+    except urllib.error.HTTPError as e:
+        return None, f"Usage request failed (HTTP {e.code})"
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        return None, f"Usage request failed ({getattr(e, 'reason', e)})"
+
+
+def jwt_claims(token):
+    try:
+        payload = token.split(".")[1]
+        return json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (IndexError, ValueError, AttributeError):
+        return {}
+
+
+CLAUDE_PLANS = {"max": "Max", "pro": "Pro", "team": "Team", "enterprise": "Enterprise"}
+CHATGPT_PLANS = {"free": "Free", "plus": "Plus", "pro": "Pro", "prolite": "Pro Lite", "team": "Team",
+                 "business": "Business", "enterprise": "Enterprise", "edu": "Edu"}
+
+# Neither fetcher ever refreshes a token: rotating it here could sign the CLI out, so an expired
+# token just reports as stale until the CLI's next session renews it.
+
+
+def fetch_claude_usage():
+    """Claude plan limits, read with Claude Code's own OAuth login."""
+    try:
+        oauth = json.loads((CLAUDE_DIR / ".credentials.json").read_text())["claudeAiOauth"]
     except (FileNotFoundError, KeyError, json.JSONDecodeError):
         return {"error": "Not signed in to Claude Code"}
 
     tier = oauth.get("rateLimitTier") or ""
-    plan = PLAN_NAMES.get(oauth.get("subscriptionType"), (oauth.get("subscriptionType") or "").title())
+    plan = CLAUDE_PLANS.get(oauth.get("subscriptionType"), (oauth.get("subscriptionType") or "").title())
     for mult in ("20x", "5x"):
         if mult in tier:
             plan = f"{plan} {mult}"
     result = {"plan": plan, "limits": []}
 
     if oauth.get("expiresAt", 0) / 1000 < time.time():
-        result["error"] = "Login expired; open the agent once to refresh it"
+        result["error"] = "Login expired; start Claude Code once to refresh it"
         return result
 
-    req = urllib.request.Request(
-        "https://api.anthropic.com/api/oauth/usage",
-        headers={
-            "Authorization": f"Bearer {oauth['accessToken']}",
-            "anthropic-beta": "oauth-2025-04-20",
-            "Content-Type": "application/json",
-            "User-Agent": "desktop-agent/1.0",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            body = json.load(resp)
-    except urllib.error.HTTPError as e:
-        result["error"] = f"Usage request failed (HTTP {e.code})"
-        return result
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
-        result["error"] = f"Usage request failed ({getattr(e, 'reason', e)})"
+    body, err = http_json("https://api.anthropic.com/api/oauth/usage",
+                          {"Authorization": f"Bearer {oauth['accessToken']}", "anthropic-beta": "oauth-2025-04-20"})
+    if err:
+        result["error"] = err
         return result
 
     limits = []
@@ -200,22 +326,78 @@ def fetch_usage():
         if scope:
             label += f" · {scope}"
         limits.append({"label": label, "percent": lim.get("percent") or 0,
-                       "resets_at": lim.get("resets_at"), "severity": lim.get("severity", "normal")})
+                       "reset_ts": parse_iso(lim.get("resets_at"))})
     if not limits:  # older response shape
         for key, label in (("five_hour", "Session"), ("seven_day", "Weekly")):
             if body.get(key):
                 limits.append({"label": label, "percent": body[key].get("utilization") or 0,
-                               "resets_at": body[key].get("resets_at"), "severity": "normal"})
+                               "reset_ts": parse_iso(body[key].get("resets_at"))})
     result["limits"] = limits
     return result
 
 
-def decorate_usage(usage):
-    now = time.time()
-    for lim in usage.get("limits", []):
-        reset = parse_iso(lim.get("resets_at"))
-        lim["detail"] = f"{round(lim['percent'])}%" + (f" · resets in {human_delta(reset - now)}" if reset else "")
-    return usage
+def fetch_chatgpt_usage():
+    """ChatGPT plan limits for Codex, read with Codex's own ChatGPT login."""
+    try:
+        auth = json.loads((CODEX_DIR / "auth.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"error": "Codex isn't signed in"}
+    tokens = auth.get("tokens") or {}
+    if not tokens.get("access_token"):
+        return {"error": "Codex uses an API key; plan limits need a ChatGPT login"}
+
+    plan_type = (jwt_claims(tokens.get("id_token")).get("https://api.openai.com/auth") or {}).get("chatgpt_plan_type")
+    result = {"plan": CHATGPT_PLANS.get(plan_type, (plan_type or "").title()), "limits": []}
+    if (jwt_claims(tokens["access_token"]).get("exp") or 0) < time.time():
+        result["error"] = "Login expired; start Codex once to refresh it"
+        return result
+
+    headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+    if tokens.get("account_id"):
+        headers["ChatGPT-Account-Id"] = tokens["account_id"]
+    body, err = http_json("https://chatgpt.com/backend-api/wham/usage", headers)
+    if err:
+        result["error"] = err
+        return result
+    if body.get("plan_type"):
+        result["plan"] = CHATGPT_PLANS.get(body["plan_type"], body["plan_type"].title())
+
+    def windows(rate_limit, suffix=""):
+        for key in ("primary_window", "secondary_window"):
+            w = (rate_limit or {}).get(key)
+            if w:
+                result["limits"].append({"label": window_label(w.get("limit_window_seconds")) + suffix,
+                                         "percent": w.get("used_percent") or 0, "reset_ts": w.get("reset_at")})
+
+    windows(body.get("rate_limit"))
+    for extra in body.get("additional_rate_limits") or []:
+        if isinstance(extra, dict):
+            name = extra.get("limit_name") or extra.get("metered_feature") or ""
+            windows(extra.get("rate_limit"), f" · {name}" if name else "")
+    return result
+
+
+PROVIDERS = {
+    "claude": {"name": "Claude", "login": CLAUDE_DIR / ".credentials.json", "fetch": fetch_claude_usage},
+    "chatgpt": {"name": "ChatGPT", "login": CODEX_DIR / "auth.json", "fetch": fetch_chatgpt_usage},
+}
+
+
+def usage_all(cache, force=False, first=None):
+    """Plan usage for every provider that has a login on this machine, `first` provider first."""
+    out = []
+    for pid in sorted(PROVIDERS, key=lambda p: p != first):
+        prov = PROVIDERS[pid]
+        if not prov["login"].exists():
+            continue
+        usage = dict(cache.get(f"usage:{pid}", USAGE_TTL, prov["fetch"], force))
+        usage.update(id=pid, name=prov["name"])
+        now = time.time()
+        for lim in usage.get("limits", []):
+            reset = lim.get("reset_ts")
+            lim["detail"] = f"{round(lim['percent'])}%" + (f" · resets in {human_delta(reset - now)}" if reset else "")
+        out.append(usage)
+    return out
 
 
 # ---------------------------------------------------------------- health checks
@@ -356,7 +538,8 @@ def crash_prompt(pid, exe):
 def status(force=False):
     cfg = load_config()
     cache = Cache()
-    usage = decorate_usage(cache.get("usage", USAGE_TTL, fetch_usage, force))
+    active = get_agent(cfg)
+    usage = usage_all(cache, force, first=AGENT_TYPES[active["type"]]["provider"])
     checks = []
     for fn in (lambda: check_updates(cache, force), check_reboot, check_failed_units,
                lambda: check_disks(cfg["disk_mounts"]), lambda: check_crashes(set(cfg["muted"])), check_journal):
@@ -370,6 +553,8 @@ def status(force=False):
     attention = sum(1 for c in checks if c["level"] in ("error", "warn"))
     worst = checks[0]["level"] if checks else "ok"
     return {"usage": usage, "checks": checks, "actions": cfg["actions"],
+            "agents": {"active": active["id"],
+                       "list": [{"id": a["id"], "name": a["name"]} for a in agent_list(cfg)]},
             "attention": attention, "worst": worst, "updated": time.strftime("%H:%M")}
 
 
@@ -379,12 +564,22 @@ def ensure_workspace():
     WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 
-def launch(prompt=None):
+def agent_command(agent):
+    kind = AGENT_TYPES[agent["type"]]
+    cmd = [which(kind["command"]) or kind["command"]]
+    if agent["model"]:
+        cmd += [kind["model_flag"], agent["model"]]
+    cmd += next(p[2] for p in kind["permissions"] if p[0] == agent["permissions"])
+    return cmd + agent["args"]
+
+
+def launch(prompt=None, agent_id=None):
     cfg = load_config()
     ensure_workspace()
-    claude = which(cfg["claude"]) or cfg["claude"]
-    cmd = [part.replace("{workspace}", str(WORKSPACE)) for part in cfg["terminal"]]
-    cmd += [claude, *cfg["claude_args"]]
+    agent = get_agent(cfg, agent_id)
+    cmd = [part.replace("{workspace}", str(WORKSPACE)).replace("{name}", agent["name"])
+           for part in cfg["terminal"]]
+    cmd += agent_command(agent)
     if prompt:
         cmd.append(prompt)
     # Run in its own transient scope so the session outlives plasmashell / the watch service.
@@ -448,14 +643,12 @@ def watch_usage():
     cache = Cache()
     while True:
         try:
-            usage = cache.get("usage", USAGE_TTL, fetch_usage, force=True)
-            for lim in usage.get("limits", []):
-                key = f"{lim['label']}|{lim.get('resets_at')}"
-                if lim["percent"] >= USAGE_ALERT_PERCENT and key not in alerted:
-                    alerted[key] = True
-                    reset = parse_iso(lim.get("resets_at"))
-                    when = f", resets in {human_delta(reset - time.time())}" if reset else ""
-                    notify("Claude usage limit", f"{lim['label']} at {round(lim['percent'])}%{when}", "dialog-warning")
+            for usage in usage_all(cache, force=True):
+                for lim in usage.get("limits", []):
+                    key = f"{usage['id']}|{lim['label']}|{lim.get('reset_ts')}"
+                    if lim["percent"] >= USAGE_ALERT_PERCENT and key not in alerted:
+                        alerted[key] = True
+                        notify(f"{usage['name']} usage limit", f"{lim['label']}: {lim['detail']}", "dialog-warning")
             # Updates are slow to compute; refreshing them here keeps the widget's popup instant.
             cache.get("updates", UPDATES_TTL, fetch_updates)
         except Exception as e:
@@ -555,9 +748,26 @@ def main(argv):
     if cmd == "status":
         print(json.dumps(status(force="--refresh" in args)))
     elif cmd == "launch":
+        agent_id = None
+        if args[:1] == ["--agent"] and len(args) > 1:
+            agent_id, args = args[1], args[2:]
         if args[:1] == ["--"]:
             args = args[1:]
-        launch(" ".join(args).strip() or None)
+        launch(" ".join(args).strip() or None, agent_id)
+    elif cmd == "agents":
+        if args[:1] == ["set"] and len(args) > 1:
+            try:
+                set_agents(args[1])
+            except (ValueError, json.JSONDecodeError) as e:
+                print(f"desktop-agent: {e}", file=sys.stderr)
+                return 2
+        print(json.dumps(agents_info(load_config())))
+    elif cmd == "use" and args:
+        try:
+            use_agent(args[0])
+        except ValueError as e:
+            print(f"desktop-agent: {e}", file=sys.stderr)
+            return 2
     elif cmd == "diagnose" and args:
         exe = next((c["exe"] for c in recent_crashes("-30d") if str(c["pid"]) == args[0]), "unknown executable")
         launch(crash_prompt(args[0], exe))

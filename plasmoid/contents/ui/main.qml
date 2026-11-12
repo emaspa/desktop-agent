@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Window
 import org.kde.kirigami as Kirigami
 import org.kde.plasma.components as PlasmaComponents
 import org.kde.plasma.core as PlasmaCore
@@ -23,7 +24,9 @@ PlasmoidItem {
     toolTipSubText: {
         if (!st) return "Loading…"
         let lines = []
-        for (const l of (st.usage.limits || [])) lines.push(l.label + ": " + l.detail)
+        lines.push("Agent: " + activeName())
+        for (const u of st.usage)
+            for (const l of (u.limits || [])) lines.push(u.name + " " + l.label + ": " + l.detail)
         for (const c of st.checks) if (c.level === "error" || c.level === "warn") lines.push(c.title)
         lines.push("Middle-click to open the agent")
         return lines.join("\n")
@@ -53,6 +56,17 @@ PlasmoidItem {
         if (loading) return
         loading = true
         exec.connectSource(cli + " status" + (force ? " --refresh" : ""))
+    }
+
+    function activeName() {
+        if (!st) return ""
+        const a = st.agents.list.find(a => a.id === st.agents.active)
+        return a ? a.name : ""
+    }
+
+    function useAgent(id) {
+        if (st) st.agents.active = id
+        exec.connectSource(cli + " use " + shq(id) + " && " + cli + " status")
     }
 
     function launch(prompt) {
@@ -85,7 +99,7 @@ PlasmoidItem {
         onTriggered: root.refresh(false)
     }
 
-    onExpandedChanged: if (expanded) refresh(false)
+    onExpandedChanged: { if (root.expanded) refresh(false) }
 
     // ------------------------------------------------------------ panel icon
 
@@ -127,22 +141,31 @@ PlasmoidItem {
     // ------------------------------------------------------------ popup
 
     fullRepresentation: PlasmaExtras.Representation {
+        id: rep
+        // Tall enough for everything, so it only scrolls when the screen is too short.
+        readonly property real neededHeight: (rep.header ? rep.header.implicitHeight : 0)
+            + content.implicitHeight + Kirigami.Units.largeSpacing * 2
         Layout.preferredWidth: Kirigami.Units.gridUnit * 24
-        Layout.preferredHeight: Kirigami.Units.gridUnit * 30
         Layout.minimumWidth: Kirigami.Units.gridUnit * 18
+        Layout.preferredHeight: Math.min(neededHeight, Screen.desktopAvailableHeight * 0.85)
+        Layout.minimumHeight: Layout.preferredHeight
+        Layout.maximumHeight: Layout.preferredHeight
         collapseMarginsHint: true
 
         header: PlasmaExtras.PlasmoidHeading {
-            RowLayout {
-                anchors.fill: parent
-                Kirigami.Heading {
-                    level: 2
-                    text: "Agent"
+            contentItem: RowLayout {
+                PlasmaComponents.ComboBox {
+                    id: agentBox
                     Layout.fillWidth: true
-                }
-                PlasmaComponents.Label {
-                    text: root.st && root.st.usage.plan ? "Claude " + root.st.usage.plan : ""
-                    opacity: 0.7
+                    model: root.st ? root.st.agents.list : []
+                    textRole: "name"
+                    onActivated: index => root.useAgent(model[index].id)
+                    // Set imperatively: a binding would break the first time the user picks an item.
+                    function sync() {
+                        if (root.st) currentIndex = root.st.agents.list.findIndex(a => a.id === root.st.agents.active)
+                    }
+                    Connections { target: root; function onStChanged() { Qt.callLater(agentBox.sync) } }
+                    PlasmaComponents.ToolTip { text: "Agent used by the prompt box, the buttons and the hotkey" }
                 }
                 PlasmaComponents.ToolButton {
                     icon.name: "view-refresh"
@@ -169,6 +192,7 @@ PlasmoidItem {
             PlasmaComponents.ScrollBar.horizontal.policy: PlasmaComponents.ScrollBar.AlwaysOff
 
             ColumnLayout {
+                id: content
                 x: Kirigami.Units.largeSpacing
                 width: scroll.availableWidth - 2 * Kirigami.Units.largeSpacing
                 spacing: Kirigami.Units.smallSpacing
@@ -190,26 +214,44 @@ PlasmoidItem {
                 // ---- plan usage
                 Kirigami.Heading { level: 5; text: "Usage"; opacity: 0.7; Layout.topMargin: Kirigami.Units.smallSpacing }
                 PlasmaComponents.Label {
-                    visible: !!(root.st && root.st.usage.error)
-                    text: root.st ? (root.st.usage.error || "") : ""
-                    wrapMode: Text.Wrap
+                    visible: !!root.st && root.st.usage.length === 0
+                    text: "No Claude Code or Codex login found."
                     opacity: 0.7
-                    Layout.fillWidth: true
                 }
                 Repeater {
-                    model: root.st ? root.st.usage.limits : []
+                    model: root.st ? root.st.usage : []
                     delegate: ColumnLayout {
+                        id: provider
                         required property var modelData
                         Layout.fillWidth: true
-                        spacing: 0
-                        RowLayout {
-                            PlasmaComponents.Label { text: modelData.label; Layout.fillWidth: true }
-                            PlasmaComponents.Label { text: modelData.detail; opacity: 0.7 }
+                        spacing: Kirigami.Units.smallSpacing
+                        PlasmaComponents.Label {
+                            text: provider.modelData.name + (provider.modelData.plan ? " " + provider.modelData.plan : "")
+                            font.bold: true
                         }
-                        PlasmaComponents.ProgressBar {
+                        PlasmaComponents.Label {
+                            visible: !!provider.modelData.error
+                            text: provider.modelData.error || ""
+                            wrapMode: Text.Wrap
+                            opacity: 0.7
                             Layout.fillWidth: true
-                            from: 0; to: 100
-                            value: modelData.percent
+                        }
+                        Repeater {
+                            model: provider.modelData.limits || []
+                            delegate: ColumnLayout {
+                                required property var modelData
+                                Layout.fillWidth: true
+                                spacing: 0
+                                RowLayout {
+                                    PlasmaComponents.Label { text: modelData.label; Layout.fillWidth: true }
+                                    PlasmaComponents.Label { text: modelData.detail; opacity: 0.7 }
+                                }
+                                PlasmaComponents.ProgressBar {
+                                    Layout.fillWidth: true
+                                    from: 0; to: 100
+                                    value: modelData.percent
+                                }
+                            }
                         }
                     }
                 }

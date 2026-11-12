@@ -3,7 +3,7 @@
     "KPlugin": {
         "Authors": [{ "Name": "Desktop Agent" }],
         "Category": "System Information",
-        "Description": "Claude Code as a system admin: plan limits, health checks, crash diagnosis",
+        "Description": "Claude Code or Codex as a system admin: plan limits, health checks, crash diagnosis",
         "Icon": "utilities-terminal",
         "Id": "dev.desktopagent.panel",
         "License": "GPL-3.0-or-later",

@@ -2,7 +2,7 @@
 Type=Application
 Name=Desktop Agent
 GenericName=System admin agent
-Comment=Open Claude Code as a system administrator for this machine
+Comment=Open the active agent (Claude Code or Codex) as a system administrator
 Exec=desktop-agent launch
 Icon=utilities-terminal
 Categories=System;
