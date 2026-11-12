@@ -56,6 +56,8 @@ Agent*. The *Agent* page has:
   list), permissions, and which agent is active. Add and remove agents here.
 - **Shortcuts**: the open-agent and show-popup hotkeys.
 
+A *Support this project* page next to it has the Buy Me a Coffee and Ko-fi links.
+
 Permissions map to each program's own flags:
 
 | Claude Code | Flags |
