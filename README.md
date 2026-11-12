@@ -24,7 +24,9 @@ distro with Plasma 6.
   Claude Code on a gateway model, say, or a read-only Codex for questions. The one you pick in
   the popup handles the prompt box, the buttons and the hotkey.
 - **Crash capture.** When something core dumps you get a notification with *Diagnose* (launches
-  the agent on the core dump) and *Mute* buttons.
+  the agent on the core dump) and *Mute* buttons. After you close a *Diagnose* session, from the
+  notification or the popup, the popup stops counting that program's earlier crashes. New ones
+  still show up.
 - **Usage alerts.** You get one notification when a plan limit passes 90%.
 - **Hotkeys.** Meta+A toggles the popup and Meta+Shift+A opens the agent.
 

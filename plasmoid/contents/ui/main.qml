@@ -73,11 +73,12 @@ PlasmoidItem {
         exec.connectSource(cli + " use " + shq(id) + " && " + cli + " status")
     }
 
-    function launch(prompt) {
+    function launch(prompt, handled) {
         // A timestamp keeps identical commands from being deduplicated by the data engine.
         // --wait keeps the source open until the terminal closes; onNewData then re-checks the system,
         // so a merged .pacnew or a finished update shows up as soon as the session ends.
-        exec.connectSource(cli + " launch --wait -- " + shq(prompt || "") + " #" + Date.now())
+        exec.connectSource(cli + " launch --wait" + (handled ? " --handled " + shq(handled) : "")
+                           + " -- " + shq(prompt || "") + " #" + Date.now())
         root.expanded = false
     }
 
@@ -314,7 +315,7 @@ PlasmoidItem {
                         PlasmaComponents.Button {
                             visible: !!modelData.prompt
                             text: modelData.action || "Fix"
-                            onClicked: root.launch(modelData.prompt)
+                            onClicked: root.launch(modelData.prompt, modelData.handled)
                         }
                     }
                 }

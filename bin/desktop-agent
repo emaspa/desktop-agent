@@ -5,7 +5,8 @@ Subcommands:
   status [--refresh]     JSON for the Plasma widget (usage limits, health checks, actions)
   launch [--agent ID] [--wait] [PROMPT...]
                          open the active agent (or ID) in a terminal, in the admin workspace;
-                         --wait returns only when the terminal closes
+                         --wait returns only when the terminal closes; --handled crash:TIME:EXE
+                         marks that crash (and EXE's earlier ones) handled once the session ends
   agents                 JSON: configured agents, the active one, models and permission choices
   agents set JSON        replace the agent list: {"active": ID, "agents": [...]}
   use ID                 make agent ID the active one
@@ -514,17 +515,43 @@ def recent_crashes(since="-24h"):
         return []
 
 
+HANDLED_CRASHES = DATA_DIR / "handled-crashes.json"
+
+
+def handled_crashes():
+    """{exe: time in µs of the newest crash of exe that a Diagnose session has dealt with}"""
+    try:
+        return json.loads(HANDLED_CRASHES.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def mark_crash_handled(exe, time_us):
+    handled = handled_crashes()
+    handled[exe] = max(handled.get(exe, 0), int(time_us))
+    HANDLED_CRASHES.parent.mkdir(parents=True, exist_ok=True)
+    tmp = HANDLED_CRASHES.with_suffix(".tmp")
+    tmp.write_text(json.dumps(handled, indent=1))
+    tmp.replace(HANDLED_CRASHES)
+
+
 def check_crashes(muted):
+    handled = handled_crashes()
     crashes = [c for c in recent_crashes() if Path(c.get("exe", "")).name not in muted and c.get("exe") not in muted]
-    if not crashes:
-        return [{"id": "crashes", "icon": "tools-report-bug", "level": "ok", "title": "No crashes today", "detail": ""}]
+    new = [c for c in crashes if c["time"] > handled.get(c["exe"], 0)]
+    if not new:
+        return [{"id": "crashes", "icon": "tools-report-bug", "level": "ok",
+                 "title": "No new crashes" if crashes else "No crashes today",
+                 "detail": f"{len(crashes)} in 24h, already diagnosed" if crashes else ""}]
+    crashes = new
     last = crashes[-1]
     names = sorted({Path(c["exe"]).name for c in crashes})
     ago = human_delta(time.time() - last["time"] / 1e6)
     return [{"id": "crashes", "icon": "tools-report-bug", "level": "warn",
              "title": f"{len(crashes)} crash{'es' if len(crashes) != 1 else ''} in 24h",
              "detail": f"last: {Path(last['exe']).name} {ago} ago" + (f" · also {', '.join(n for n in names if n != Path(last['exe']).name)[:60]}" if len(names) > 1 else ""),
-             "action": "Diagnose", "prompt": crash_prompt(last["pid"], last["exe"])}]
+             "action": "Diagnose", "prompt": crash_prompt(last["pid"], last["exe"]),
+             "handled": f"crash:{last['time']}:{last['exe']}"}]
 
 
 def check_journal():
@@ -595,7 +622,7 @@ def agent_command(agent):
     return cmd + agent["args"]
 
 
-def launch(prompt=None, agent_id=None, wait=False):
+def launch(prompt=None, agent_id=None, wait=False, on_done=None):
     cfg = load_config()
     ensure_workspace()
     agent = get_agent(cfg, agent_id)
@@ -612,6 +639,8 @@ def launch(prompt=None, agent_id=None, wait=False):
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if wait:  # the widget waits so it can re-check the system once the session is over
         proc.wait()
+    if on_done:
+        on_done()
 
 
 # ---------------------------------------------------------------- watch service
@@ -652,9 +681,11 @@ def watch_crashes():
         last_seen[exe] = time.time()
         sig = ev.get("COREDUMP_SIGNAL_NAME") or f"signal {ev.get('COREDUMP_SIGNAL', '?')}"
 
-        def on_action(action, pid=pid, exe=exe, name=name):
-            if action == "diagnose":
-                launch(crash_prompt(pid, exe))
+        crash_time = ev.get("COREDUMP_TIMESTAMP") or ev.get("__REALTIME_TIMESTAMP") or time.time() * 1e6
+
+        def on_action(action, pid=pid, exe=exe, name=name, crash_time=crash_time):
+            if action == "diagnose":  # runs in notify()'s thread, so waiting for the session is fine
+                launch(crash_prompt(pid, exe), wait=True, on_done=lambda: mark_crash_handled(exe, crash_time))
             elif action == "mute":
                 mute(name)
 
@@ -772,17 +803,23 @@ def main(argv):
     if cmd == "status":
         print(json.dumps(status(force="--refresh" in args)))
     elif cmd == "launch":
-        agent_id, wait = None, False
-        while args[:1] in (["--agent"], ["--wait"]):
+        agent_id, wait, on_done = None, False, None
+        while args[:1] in (["--agent"], ["--wait"], ["--handled"]):
             if args[0] == "--wait":
                 wait, args = True, args[1:]
-            elif len(args) > 1:
+            elif len(args) < 2:
+                break
+            elif args[0] == "--agent":
                 agent_id, args = args[1], args[2:]
             else:
-                break
+                kind, _, rest = args[1].partition(":")
+                t, _, exe = rest.partition(":")
+                if kind == "crash" and t.isdigit() and exe:
+                    on_done = lambda exe=exe, t=t: mark_crash_handled(exe, t)
+                args = args[2:]
         if args[:1] == ["--"]:
             args = args[1:]
-        launch(" ".join(args).strip() or None, agent_id, wait)
+        launch(" ".join(args).strip() or None, agent_id, wait, on_done)
     elif cmd == "agents":
         if args[:1] == ["set"] and len(args) > 1:
             try:
