@@ -1,7 +1,7 @@
 {
     "KPackageStructure": "Plasma/Applet",
     "KPlugin": {
-        "Authors": [{ "Name": "Desktop Agent" }],
+        "Authors": [{ "Name": "Emanuele Sparvoli" }],
         "Category": "System Information",
         "Description": "Claude Code or Codex as a system admin: plan limits, health checks, crash diagnosis",
         "Icon": "utilities-terminal",
