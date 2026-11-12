@@ -289,7 +289,7 @@ def jwt_claims(token):
         return {}
 
 
-CLAUDE_PLANS = {"max": "Max", "pro": "Pro", "team": "Team", "enterprise": "Enterprise"}
+CLAUDE_PLANS = {"ultra": "Ultra", "max": "Max", "pro": "Pro", "team": "Team", "enterprise": "Enterprise"}
 CHATGPT_PLANS = {"free": "Free", "plus": "Plus", "pro": "Pro", "prolite": "Pro Lite", "team": "Team",
                  "business": "Business", "enterprise": "Enterprise", "edu": "Edu"}
 
@@ -306,9 +306,10 @@ def fetch_claude_usage():
 
     tier = oauth.get("rateLimitTier") or ""
     plan = CLAUDE_PLANS.get(oauth.get("subscriptionType"), (oauth.get("subscriptionType") or "").title())
-    for mult in ("20x", "5x"):
-        if mult in tier:
-            plan = f"{plan} {mult}"
+    if "20x" in tier:  # Max 20x was renamed Ultra; the login still reports it as max / *_max_20x
+        plan = "Ultra"
+    elif "5x" in tier:
+        plan = f"{plan} 5x"
     result = {"plan": plan, "limits": []}
 
     if oauth.get("expiresAt", 0) / 1000 < time.time():
