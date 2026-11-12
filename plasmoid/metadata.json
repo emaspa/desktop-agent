@@ -7,6 +7,16 @@
                 "Website": "https://sparvoli.it"
             }
         ],
+        "OtherContributors": [
+            {
+                "Name": "Support on Buy Me a Coffee",
+                "Website": "https://buymeacoffee.com/emaspa"
+            },
+            {
+                "Name": "Support on Ko-fi",
+                "Website": "https://ko-fi.com/emaspa"
+            }
+        ],
         "Category": "System Information",
         "Description": "Claude Code or Codex as a system admin: plan limits, health checks, crash diagnosis",
         "Icon": "utilities-terminal",
