@@ -414,11 +414,7 @@ def fetch_updates():
     if helper:
         code, out = run([helper, "-Qua"], timeout=120)
         aur = [line.split()[0] for line in out.splitlines() if line.strip() and not line.startswith(":")]
-    pacnew = []
-    if which("pacdiff"):
-        _, out = run(["pacdiff", "-o"], timeout=60)
-        pacnew = [line for line in out.splitlines() if line.strip()]
-    return {"repo": repo, "aur": aur, "pacnew": pacnew}
+    return {"repo": repo, "aur": aur}
 
 
 def check_updates(cache, force):
@@ -434,8 +430,18 @@ def check_updates(cache, force):
     else:
         checks.append({"id": "updates", "icon": "system-software-update", "level": "ok",
                        "title": "System up to date", "detail": ""})
-    if u["pacnew"]:
-        files = u["pacnew"]
+    return checks
+
+
+def check_pacnew():
+    # Not cached: pacdiff -o only reads the pacman db (well under a second), and a stale list
+    # would keep nagging about files that were already merged.
+    if not which("pacdiff"):
+        return []
+    _, out = run(["pacdiff", "-o"], timeout=60)
+    files = [line for line in out.splitlines() if line.strip()]
+    checks = []
+    if files:
         checks.append({"id": "pacnew", "icon": "document-edit", "level": "warn",
                        "title": f"{len(files)} .pacnew file{'s' if len(files) != 1 else ''}",
                        "detail": ", ".join(Path(f).name for f in files[:3]) + ("…" if len(files) > 3 else ""),
@@ -543,7 +549,7 @@ def status(force=False):
     active = get_agent(cfg)
     usage = usage_all(cache, force, first=AGENT_TYPES[active["type"]]["provider"])
     checks = []
-    for fn in (lambda: check_updates(cache, force), check_reboot, check_failed_units,
+    for fn in (lambda: check_updates(cache, force), check_pacnew, check_reboot, check_failed_units,
                lambda: check_disks(cfg["disk_mounts"]), lambda: check_crashes(set(cfg["muted"])), check_journal):
         try:
             checks.extend(fn())
