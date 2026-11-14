@@ -13,7 +13,7 @@
         "Id": "dev.desktopagent.panel",
         "License": "GPL-3.0-or-later",
         "Name": "Desktop Agent",
-        "Version": "1.1.0",
+        "Version": "1.2.0",
         "Website": "https://github.com/emaspa/desktop-agent",
         "BugReportUrl": "https://github.com/emaspa/desktop-agent/issues"
     },
