@@ -135,6 +135,11 @@ Permissions map to each program's own flags:
 "Own settings" passes no flags, so `~/.claude/settings.json` or `~/.codex/config.toml` decides.
 A sandboxed Codex can't run `sudo`, so use full access or never-ask for system changes.
 
+The *Monitoring* page has a switch for each part of the popup: plan usage, updates, .pacnew
+files, pending reboot, failed services, disk space, crashes and boot errors. A check you turn
+off leaves the popup and stops counting toward the badge. Two more switches cover the
+notifications, one for crashes and one for plan limits past 90%. Everything is on by default.
+
 ### The agents' instructions
 
 Agents run in Konsole from `~/.local/share/desktop-agent/workspace`. `AGENTS.md` there (which
@@ -163,7 +168,7 @@ arguments to its command line. `muted` lists programs whose crashes don't notify
 
 Everything in the settings page is scriptable too: `desktop-agent agents`,
 `desktop-agent use codex`, `desktop-agent launch --agent codex "check my disks"`,
-`desktop-agent shortcut "Meta+Ctrl+A"`. Run `desktop-agent --help` for the full list.
+`desktop-agent shortcut "Meta+Ctrl+A"`, `desktop-agent monitor set '{"journal": false}'`. Run `desktop-agent --help` for the full list.
 
 ## How it works
 

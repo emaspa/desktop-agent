@@ -8,6 +8,11 @@ ConfigModel {
         source: "configAgent.qml"
     }
     ConfigCategory {
+        name: "Monitoring"
+        icon: "view-process-system"
+        source: "configMonitor.qml"
+    }
+    ConfigCategory {
         name: "Support this project"
         icon: "help-donate"
         source: "configSupport.qml"

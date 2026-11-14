@@ -26,7 +26,7 @@ PlasmoidItem {
         if (!st) return "Loading…"
         let lines = []
         lines.push("Agent: " + activeName())
-        for (const u of st.usage)
+        for (const u of (st.usage || []))
             for (const l of (u.limits || [])) lines.push(u.name + " " + l.label + ": " + l.detail)
         for (const c of st.checks) if (c.level === "error" || c.level === "warn") lines.push(c.title)
         lines.push("Middle-click to open the agent")
@@ -233,15 +233,18 @@ PlasmoidItem {
                     }
                 }
 
-                // ---- plan usage
-                Kirigami.Heading { level: 5; text: "Usage"; opacity: 0.7; Layout.topMargin: Kirigami.Units.smallSpacing }
+                // ---- plan usage (null when turned off in the Monitoring settings)
+                Kirigami.Heading {
+                    visible: !root.st || !!root.st.usage
+                    level: 5; text: "Usage"; opacity: 0.7; Layout.topMargin: Kirigami.Units.smallSpacing
+                }
                 PlasmaComponents.Label {
-                    visible: !!root.st && root.st.usage.length === 0
+                    visible: !!root.st && !!root.st.usage && root.st.usage.length === 0
                     text: "No Claude Code or Codex login found."
                     opacity: 0.7
                 }
                 Repeater {
-                    model: root.st ? root.st.usage : []
+                    model: root.st && root.st.usage ? root.st.usage : []
                     delegate: ColumnLayout {
                         id: provider
                         required property var modelData
@@ -280,6 +283,7 @@ PlasmoidItem {
 
                 // ---- system checks
                 Kirigami.Heading {
+                    visible: !root.st || root.st.checks.length > 0
                     level: 5
                     text: "System" + (root.st ? " · checked " + root.st.updated : "")
                     opacity: 0.7

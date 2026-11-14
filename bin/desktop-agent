@@ -18,6 +18,8 @@ Subcommands:
   watch                  long-running: crash notifications + usage-limit alerts
   mute EXE | unmute EXE  silence crash notifications for one program
   shortcut [KEYS]        show or set the open-agent hotkey, e.g. "Meta+Shift+A" ("" clears it)
+  monitor                JSON: what is monitored (each check and notification, on or off)
+  monitor set JSON       turn some of them on or off, e.g. '{"updates": false}'
   config                 print the effective config and its path
 """
 
@@ -59,7 +61,12 @@ DEFAULT_CONFIG = {
         {"id": "claude", "name": "Claude Code", "type": "claude", "model": "", "permissions": "", "args": []},
         {"id": "codex", "name": "Codex (ChatGPT)", "type": "codex", "model": "", "permissions": "", "args": []},
     ],
-    "crash_capture": True,
+    # What the popup checks and what the watch service notifies about; all on by default.
+    "monitor": {
+        "usage": True, "updates": True, "pacnew": True, "reboot": True, "units": True,
+        "disks": True, "crashes": True, "journal": True,
+        "crash_notifications": True, "usage_notifications": True,
+    },
     "muted": [],
     "disk_mounts": ["/", "/home"],
     "actions": [
@@ -85,12 +92,32 @@ DEFAULT_CONFIG = {
 def load_config():
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     try:
-        cfg.update(json.loads(CONFIG_PATH.read_text()))
+        user = json.loads(CONFIG_PATH.read_text())
     except FileNotFoundError:
-        pass
+        user = {}
     except json.JSONDecodeError as e:
         print(f"desktop-agent: ignoring invalid {CONFIG_PATH}: {e}", file=sys.stderr)
+        user = {}
+    cfg.update(user)
+    # Merged key by key, so a config that sets one switch keeps the defaults for the rest.
+    cfg["monitor"] = {**DEFAULT_CONFIG["monitor"], **(user.get("monitor") or {})}
+    if "crash_capture" in cfg:  # 1.1 and earlier: one switch for crash notifications
+        if "crash_notifications" not in (user.get("monitor") or {}):
+            cfg["monitor"]["crash_notifications"] = bool(cfg["crash_capture"])
+        del cfg["crash_capture"]
     return cfg
+
+
+def set_monitor(payload):
+    changes = json.loads(payload)
+    if not isinstance(changes, dict):
+        raise ValueError("expected a JSON object")
+    unknown = set(changes) - set(DEFAULT_CONFIG["monitor"])
+    if unknown:
+        raise ValueError(f"unknown monitor keys: {', '.join(sorted(unknown))}")
+    cfg = load_config()
+    cfg["monitor"].update({k: bool(v) for k, v in changes.items()})
+    save_config(cfg)
 
 
 def save_config(cfg):
@@ -613,12 +640,18 @@ def dismiss_key(check):
 def status(force=False, dismiss=None):
     """dismiss=True hides the current alerts from the panel icon, False shows them again."""
     cfg = load_config()
+    on = cfg["monitor"]
     cache = Cache()
     active = get_agent(cfg)
-    usage = usage_all(cache, force, first=AGENT_TYPES[active["type"]]["provider"])
+    # None (not []) tells the widget the usage section is off, rather than that no login was found.
+    usage = usage_all(cache, force, first=AGENT_TYPES[active["type"]]["provider"]) if on["usage"] else None
     checks = []
-    for fn in (lambda: check_updates(cache, force), check_pacnew, check_reboot, check_failed_units,
-               lambda: check_disks(cfg["disk_mounts"]), lambda: check_crashes(set(cfg["muted"])), check_journal):
+    all_checks = {
+        "updates": lambda: check_updates(cache, force), "pacnew": check_pacnew, "reboot": check_reboot,
+        "units": check_failed_units, "disks": lambda: check_disks(cfg["disk_mounts"]),
+        "crashes": lambda: check_crashes(set(cfg["muted"])), "journal": check_journal,
+    }
+    for fn in (fn for key, fn in all_checks.items() if on[key]):
         try:
             checks.extend(fn())
         except Exception as e:  # one broken check must not blank the widget
@@ -732,7 +765,7 @@ def watch_crashes():
             continue
         cfg = load_config()
         name = Path(exe).name
-        if not cfg["crash_capture"] or name in cfg["muted"] or exe in cfg["muted"]:
+        if not cfg["monitor"]["crash_notifications"] or name in cfg["muted"] or exe in cfg["muted"]:
             continue
         if time.time() - last_seen.get(exe, 0) < 120:  # crash loops: one notification per program
             continue
@@ -757,14 +790,16 @@ def watch_usage():
     cache = Cache()
     while True:
         try:
-            for usage in usage_all(cache, force=True):
+            on = load_config()["monitor"]
+            for usage in usage_all(cache, force=True) if on["usage_notifications"] else []:
                 for lim in usage.get("limits", []):
                     key = f"{usage['id']}|{lim['label']}|{lim.get('reset_ts')}"
                     if lim["percent"] >= USAGE_ALERT_PERCENT and key not in alerted:
                         alerted[key] = True
                         notify(f"{usage['name']} usage limit", f"{lim['label']}: {lim['detail']}", "dialog-warning")
             # Updates are slow to compute; refreshing them here keeps the widget's popup instant.
-            cache.get("updates", UPDATES_TTL, fetch_updates)
+            if on["updates"]:
+                cache.get("updates", UPDATES_TTL, fetch_updates)
         except Exception as e:
             print(f"usage watch: {e}", file=sys.stderr, flush=True)
         time.sleep(USAGE_TTL)
@@ -915,6 +950,14 @@ def main(argv):
                 print(f"desktop-agent: {e}", file=sys.stderr)
                 return 2
         print(get_shortcut())
+    elif cmd == "monitor":
+        if args[:1] == ["set"] and len(args) > 1:
+            try:
+                set_monitor(args[1])
+            except (ValueError, json.JSONDecodeError) as e:
+                print(f"desktop-agent: {e}", file=sys.stderr)
+                return 2
+        print(json.dumps(load_config()["monitor"]))
     elif cmd == "config":
         print(f"# {CONFIG_PATH}")
         print(json.dumps(load_config(), indent=2))
