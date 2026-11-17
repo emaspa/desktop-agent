@@ -18,6 +18,9 @@ to undo it.
 - Root commands below use `sudo`. If `local.md` in this folder or the user's global instructions
   name a sudo wrapper, use that instead. Each call may prompt for authentication, so batch root
   work into few calls.
+- In Codex, `sudo` always fails inside the sandbox, which doesn't mean root is unavailable. Run
+  each root command with `sandbox_permissions: "require_escalated"` and a one-line justification.
+  The user approves it, or a rule lets it through.
 
 ## Rules
 

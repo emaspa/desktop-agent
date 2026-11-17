@@ -56,10 +56,12 @@ DEFAULT_CONFIG = {
     "terminal": ["konsole", "--workdir", "{workspace}", "-p", "tabtitle={name}", "-e"],
     # Agents you can switch between. "type" picks the CLI (see AGENT_TYPES); "model" and
     # "permissions" empty mean the CLI's own defaults; "args" are extra CLI arguments.
+    # Codex defaults to its workspace sandbox: with no flags, Codex picks an approval policy
+    # that never lets a command leave the sandbox, so the agent can't reach root at all.
     "active_agent": "claude",
     "agents": [
         {"id": "claude", "name": "Claude Code", "type": "claude", "model": "", "permissions": "", "args": []},
-        {"id": "codex", "name": "Codex (ChatGPT)", "type": "codex", "model": "", "permissions": "", "args": []},
+        {"id": "codex", "name": "Codex (ChatGPT)", "type": "codex", "model": "", "permissions": "workspace", "args": []},
     ],
     # What the popup checks and what the watch service notifies about; all on by default.
     "monitor": {
@@ -199,6 +201,7 @@ class Cache:
 AGENT_TYPES = {
     "claude": {
         "label": "Claude Code", "command": "claude", "provider": "claude", "model_flag": "--model",
+        "default_permissions": "",
         "permissions": [
             ("", "Claude Code's own settings", []),
             ("plan", "Read-only: plan mode, no changes", ["--permission-mode", "plan"]),
@@ -210,6 +213,7 @@ AGENT_TYPES = {
     },
     "codex": {
         "label": "Codex", "command": "codex", "provider": "chatgpt", "model_flag": "--model",
+        "default_permissions": "workspace",
         "permissions": [
             ("", "Codex's own settings", []),
             ("read-only", "Read-only sandbox", ["--sandbox", "read-only", "--ask-for-approval", "on-request"]),
@@ -269,6 +273,7 @@ def agents_info(cfg):
         "agents": agent_list(cfg),
         "types": {t: {"label": d["label"], "installed": bool(which(d["command"])),
                       "models": model_choices(t),
+                      "default_permissions": d["default_permissions"],
                       "permissions": [{"id": p[0], "label": p[1]} for p in d["permissions"]]}
                   for t, d in AGENT_TYPES.items()},
     }

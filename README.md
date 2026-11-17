@@ -133,7 +133,12 @@ Permissions map to each program's own flags:
 | Never ask | `--dangerously-bypass-approvals-and-sandbox` |
 
 "Own settings" passes no flags, so `~/.claude/settings.json` or `~/.codex/config.toml` decides.
-A sandboxed Codex can't run `sudo`, so use full access or never-ask for system changes.
+Claude Code starts on its own settings. Codex starts sandboxed to the workspace, because with no
+flags Codex never lets a command leave its sandbox, and `sudo` can't work inside it. In the
+workspace mode the agent asks you before running a root command outside the sandbox. A Codex
+[rule](https://developers.openai.com/codex/rules) such as
+`prefix_rule(pattern=["sudo"], decision="allow")` in `~/.codex/rules/` skips that question.
+Agents you saved before 1.2.1 keep their setting.
 
 The *Monitoring* page has a switch for each part of the popup: plan usage, updates, .pacnew
 files, pending reboot, failed services, disk space, crashes and boot errors. A check you turn

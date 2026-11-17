@@ -54,7 +54,7 @@ KCM.SimpleKCM {
     function addAgent(type) {
         const id = type + "-" + Date.now().toString(36)
         agentsModel.append({ aid: id, name: types[type].label, type: type, modelId: "",
-                             permissions: "", argsJson: "[]" })
+                             permissions: types[type].default_permissions || "", argsJson: "[]" })
         markAgentsDirty()
     }
 
